@@ -3,7 +3,7 @@
 
 # COMPLETE REPLICATION SCRIPT
 # Run this file from top to bottom. It rebuilds the sample from the raw
-# L2CU files and reproduces every number reported in the thesis.
+# L2CU files and reproduces every number reported in the thesis.L2CU file can be uploaded the from WorldBank microdata.
 
 # Requirements: haven, dplyr, fixest
 # Note: wildrwolf and fwildclusterboot are not available for R 4.6, so the
