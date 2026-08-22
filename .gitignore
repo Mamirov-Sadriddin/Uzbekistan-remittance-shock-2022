@@ -1,0 +1,10 @@
+# Ignore raw datasets and sensitive information
+*.dta
+*.csv
+*.RData
+*.rds
+*.xlsx
+*.xls
+*.tsv
+*.rda
+*.sqlite
