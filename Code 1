@@ -3,7 +3,8 @@
 
 # COMPLETE REPLICATION SCRIPT
 # Run this file from top to bottom. It rebuilds the sample from the raw
-# L2CU files and reproduces every number reported in the thesis.L2CU file can be uploaded the from WorldBank Microdata.
+# L2CU files and reproduces every number reported in the thesis. L2CU data can 
+# be obtained from the World Bank Microdata Library.
 
 # Requirements: haven, dplyr, fixest
 # Note: wildrwolf and fwildclusterboot are not available for R 4.6, so the
@@ -65,7 +66,7 @@ mig <- ind |>
          sends          = as.integer(mig_living_remittance == 1),
          remit_hh       = as.integer(remittance_hh == 1),
          lifeline       = as.integer(!is.na(mig_living_country) & mig_living_work == 1 &
-                                     mig_living_remittance == 1)) |>
+                                       mig_living_remittance == 1)) |>
   group_by(hhid, round) |>
   summarise(working_abroad = safe_max(working_abroad),
             has_abroad     = safe_max(has_abroad),
@@ -156,7 +157,7 @@ rw_randomization <- function(h, outcomes, B = 2000) {
   dat <- h["hhid"]
   dat$round <- h$round
   dat$post <- h$post
-  for (y in outcomes) {                       
+  for (y in outcomes) {                        
     mm <- tapply(ifelse(h$post == 0, h[[y]], NA), h$month, mean, na.rm = TRUE)
     dat[[paste0(y, "_p")]] <- as.numeric(h[[y]] - mm[as.character(h$month)])
   }
@@ -217,7 +218,7 @@ mech <- list(
   channel  = feols(lifeline_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
 
 etable(mech)
-cat("Expected -0.098 / -0.076 / -0.060 / -0.073 (composite p = 0.075 two sided)\n")
+cat("Expected -0.098 / -0.076 / -0.060 / -0.382 / -0.073 (composite p = 0.075 two sided)\n")
 
 cat("\nTable B.6: Mechanism by Phase\n")
 print(feols(lifeline_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
@@ -301,7 +302,6 @@ print(balance(D, c("hhsize", "mean_age", "max_educ", "share_child", "share_femal
                    "received_remit", "remit_usd", "got_wage",
                    "food_insec", "reduced_food", "borrowed", "used_savings", "sold_assets")))
 cat("Expected: education -0.285*, female +0.431*, wage -0.266*, remittances 0.774/0.774\n")
-
 
 # 12. Robustness: Definitions
 cat("\nTable B.9: Alternative Definitions\n")
