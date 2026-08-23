@@ -330,11 +330,9 @@ cat("Expected majority +0.279 (53), any +0.219 (85), all +0.213 (40)\n")
 
 cat("\nReplication Complete\n")
 
-#   Table C.1 is survey wording and Table C.3 is a stated assumption, so only
-#   Table C.2 is computed. The variable labels behind C.1 are printed for
-#   checking, and the C.3 rates are echoed from the object used in the analysis.
+# Appendix C: Sample Construction, Source Variables, and Conversion Rates
 
-cat("\n=========== TABLE C.2: SAMPLE CONSTRUCTION ===========\n")
+cat("\nTable C.2: Sample Construction\n")
 
 bm_all <- ind |> filter(round %in% B, !is.na(mig_living_country)) |>
   mutate(is_ru = as.integer(mig_living_country == 1))
@@ -354,7 +352,7 @@ status <- bm_all |>
             ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
   filter(hhid %in% ru_share$hhid[ru_share$ru > 0.5])
 
-hh_status   <- nrow(status)                       # Russia HHs with any usable answer
+hh_status   <- nrow(status)
 hh_ties     <- sum(status$noff == status$ninf)
 hh_noanswer <- hh_russia - hh_status
 usable      <- status |> filter(noff != ninf)
@@ -382,8 +380,8 @@ cat("  migrant records over the four baseline rounds:",
     sum(bm_all$is_ru == 1 & bm_all$mig_living_work_official %in% c(1,2)), "\n")
 cat("expected 2,499 / 254 / 204 / 50 / 2,245 / 190 / 53 / 137 / 14 (12 ties, 2 no answer), 981 records\n")
 
-# Table C.1: the survey wording behind each variable
-cat("\n=========== TABLE C.1: SOURCE VARIABLES ===========\n")
+# Table C.1: Source variables and survey wording
+cat("\nTable C.1: Source Variables\n")
 lab <- function(d, v) {
   a <- attr(d[[v]], "label")
   if (is.null(a)) "(no label)" else a
@@ -396,9 +394,75 @@ for (v in c("mig_living_country","mig_living_work","mig_living_work_official",
             "mig_living_remittance","remittance_hh"))
   cat(sprintf("  %-22s %s\n", v, lab(ind, v)))
 
-# Table C.3: the conversion rates actually used
-cat("\n=========== TABLE C.3: CURRENCY CONVERSION ===========\n")
+# Table C.3: Currency conversion rates used
+cat("\nTable C.3: Currency Conversion\n")
 print(data.frame(Currency = c("Uzbek som","US dollar","Euro","Russian ruble","Kazakh tenge"),
                  `Units per USD` = c(11500, 1, 0.91, 85, 460),
                  check.names = FALSE), row.names = FALSE)
 cat("  (these are the fixed rates in the fx vector used above)\n")
+
+
+# Section 8.3: Oster (2019) Sensitivity
+
+cat("\nOster (2019) Sensitivity to Unobservables\n")
+
+# Baseline observables, one row per household
+dem <- ind |> filter(round %in% B) |>
+  group_by(hhid) |>
+  summarise(educ = suppressWarnings(max(education, na.rm = TRUE)),
+            fem  = mean(gender == 2, na.rm = TRUE),
+            agem = mean(age,        na.rm = TRUE), .groups = "drop") |>
+  mutate(across(everything(), ~ifelse(is.infinite(.x), NA, .x)))
+
+chan <- ind |> filter(round %in% B, mig_living_country == 1,
+                    mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(unoff = mean(mig_living_official == 2, na.rm = TRUE), .groups = "drop")
+
+hbase <- hhf |> filter(round %in% B) |>
+  group_by(hhid) |>
+  summarise(hsz  = mean(hhsize, na.rm = TRUE),
+            wage = mean(wage_past30d == 1, na.rm = TRUE), .groups = "drop")
+
+ho <- h |>
+  left_join(dem, by = "hhid") |>
+  left_join(chan, by = "hhid") |>
+  left_join(hbase, by = "hhid") |>
+  mutate(educ_p = educ * post, fem_p  = fem  * post, agem_p = agem * post,
+         unoff_p = unoff * post, hsz_p = hsz * post, wage_p = wage * post) |>
+  filter(!is.na(educ_p), !is.na(fem_p), !is.na(agem_p),
+         !is.na(unoff_p), !is.na(hsz_p), !is.na(wage_p),
+         !is.na(food_insuff_des))
+
+# Restricted and full models
+# Oster's R-squared must include the explanatory power of the fixed effects,
+# so the household and round dummies enter as regressors rather than as
+# absorbed effects.
+m_r <- lm(food_insuff_des ~ inf_post + factor(hhid) + factor(round), data = ho)
+m_f <- lm(food_insuff_des ~ inf_post + educ_p + fem_p + agem_p +
+            unoff_p + hsz_p + wage_p + factor(hhid) + factor(round), data = ho)
+
+b0 <- coef(m_r)["inf_post"]; R0 <- summary(m_r)$r.squared
+b1 <- coef(m_f)["inf_post"]; R1 <- summary(m_f)$r.squared
+
+cat(sprintf("  restricted   beta = %+.4f   R2 = %.4f\n", b0, R0))
+cat(sprintf("  full         beta = %+.4f   R2 = %.4f\n", b1, R1))
+cat(sprintf("  observations %d, households %d\n", nrow(ho), n_distinct(ho$hhid)))
+cat(sprintf("  coefficient movement when observables are added: %+.4f\n\n", b1 - b0))
+
+# Delta and the bias-adjusted coefficient
+oster <- function(b0, b1, R0, R1, mult) {
+  Rmax  <- min(mult * R1, 1)
+  delta <- (b1 * (R1 - R0)) / ((b0 - b1) * (Rmax - R1))
+  bstar <- b1 - (b0 - b1) * (Rmax - R1) / (R1 - R0)
+  c(Rmax = Rmax, delta = delta, beta_adjusted = bstar)
+}
+res <- t(sapply(c(1.3, 2.0), function(k) oster(b0, b1, R0, R1, k)))
+rownames(res) <- c("Rmax = 1.3 x R1", "Rmax = 2.0 x R1")
+print(round(res, 3))
+
+cat("\n  Reading: the estimate moves away from zero when the observable\n")
+cat("  differences are controlled for, so delta is negative. Unobserved\n")
+cat("  differences would have to be correlated with informal status in the\n")
+cat("  opposite direction from the observed ones to explain the result away.\n")
+cat("  expected: beta 0.279 -> 0.286, R2 0.234 -> 0.239, delta about -2.3\n")
