@@ -329,3 +329,76 @@ print(rbind(
 cat("Expected majority +0.279 (53), any +0.219 (85), all +0.213 (40)\n")
 
 cat("\nReplication Complete\n")
+
+#   Table C.1 is survey wording and Table C.3 is a stated assumption, so only
+#   Table C.2 is computed. The variable labels behind C.1 are printed for
+#   checking, and the C.3 rates are echoed from the object used in the analysis.
+
+cat("\n=========== TABLE C.2: SAMPLE CONSTRUCTION ===========\n")
+
+bm_all <- ind |> filter(round %in% B, !is.na(mig_living_country)) |>
+  mutate(is_ru = as.integer(mig_living_country == 1))
+
+hh_panel   <- n_distinct(hhf$hhid)
+hh_migrant <- n_distinct(bm_all$hhid)
+ru_share   <- bm_all |> group_by(hhid) |>
+  summarise(ru = mean(is_ru), .groups = "drop")
+hh_russia  <- sum(ru_share$ru >  0.5)
+hh_other   <- sum(ru_share$ru <= 0.5)
+hh_nomig   <- hh_panel - hh_migrant
+
+status <- bm_all |>
+  filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(noff = sum(mig_living_work_official == 1),
+            ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
+  filter(hhid %in% ru_share$hhid[ru_share$ru > 0.5])
+
+hh_status   <- nrow(status)                       # Russia HHs with any usable answer
+hh_ties     <- sum(status$noff == status$ninf)
+hh_noanswer <- hh_russia - hh_status
+usable      <- status |> filter(noff != ninf)
+n_informal  <- sum(usable$ninf >  usable$noff)
+n_formal    <- sum(usable$noff >  usable$ninf)
+
+print(data.frame(
+  Step = c("Households in the L2CU panel",
+           "With a migrant abroad in the baseline window (rounds 39 to 42)",
+           "   of which migrants mostly in Russia",
+           "   of which migrants mostly in other destinations",
+           "Without a migrant in the baseline window",
+           "Russia migrant households with a usable formality status",
+           "   classified informal (majority rule)",
+           "   classified formal (majority rule)",
+           "   excluded (ties, and without a usable response)"),
+  Households = c(hh_panel, hh_migrant, hh_russia, hh_other, hh_nomig,
+                 n_informal + n_formal, n_informal, n_formal,
+                 hh_ties + hh_noanswer)),
+  row.names = FALSE)
+
+cat(sprintf("\n  of the %d excluded: %d ties, %d without a usable response\n",
+            hh_ties + hh_noanswer, hh_ties, hh_noanswer))
+cat("  migrant records over the four baseline rounds:",
+    sum(bm_all$is_ru == 1 & bm_all$mig_living_work_official %in% c(1,2)), "\n")
+cat("expected 2,499 / 254 / 204 / 50 / 2,245 / 190 / 53 / 137 / 14 (12 ties, 2 no answer), 981 records\n")
+
+# Table C.1: the survey wording behind each variable
+cat("\n=========== TABLE C.1: SOURCE VARIABLES ===========\n")
+lab <- function(d, v) {
+  a <- attr(d[[v]], "label")
+  if (is.null(a)) "(no label)" else a
+}
+for (v in c("food_past30d","consumption_past30d","medical_past30d",
+            "utility_past30d","water_disruption","loan_past30d",
+            "savings_past30d","assets_past30d"))
+  cat(sprintf("  %-22s %s\n", v, lab(hhf, v)))
+for (v in c("mig_living_country","mig_living_work","mig_living_work_official",
+            "mig_living_remittance","remittance_hh"))
+  cat(sprintf("  %-22s %s\n", v, lab(ind, v)))
+
+# Table C.3: the conversion rates actually used
+cat("\n=========== TABLE C.3: CURRENCY CONVERSION ===========\n")
+print(data.frame(Currency = c("Uzbek som","US dollar","Euro","Russian ruble","Kazakh tenge"),
+                 `Units per USD` = c(11500, 1, 0.91, 85, 460),
+                 check.names = FALSE), row.names = FALSE)
+cat("  (these are the fixed rates in the fx vector used above)\n")
