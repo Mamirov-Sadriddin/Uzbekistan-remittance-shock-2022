@@ -1,16 +1,15 @@
-# Run in the same session as Code 1
+# figures.R
+# Generate all figures for the thesis.
+# Run after analysis.R in the same R session.
 
 library(fixest)
 library(dplyr)
 
-# Setup output directory
 OUT <- file.path(path.expand("~"), "Downloads", "thesis", "figures")
 dir.create(OUT, recursive = TRUE, showWarnings = FALSE)
 
-# Set base dimensions in inches
 W <- 6.5
 H <- 4
-
 
 # Figure 1: Food insecurity in levels
 q <- h |>
@@ -20,60 +19,47 @@ q <- h |>
 
 pdf(file.path(OUT, "fig1_levels.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
-
 with(subset(q, informal == 0),
      plot(qtr, rate, type = "o", pch = 16, cex = 0.6, col = "#4477AA", lwd = 1.4,
           ylim = c(0, max(q$rate, na.rm = TRUE) * 1.05),
           xlab = "Quarter", ylab = "Share of households food insecure"))
-
 with(subset(q, informal == 1),
      lines(qtr, rate, type = "o", pch = 15, cex = 0.6, col = "#CC3311", lwd = 1.4))
-
 abline(v = as.Date("2022-02-24"), lty = 2, col = "grey40")
-
 legend("topleft", bty = "n", cex = 0.8, lty = 1, pch = c(15, 16),
        col = c("#CC3311", "#4477AA"),
        legend = c("Informal migrant households (n = 53)",
                   "Formal migrant households (n = 137)"))
 dev.off()
 
-
-# Figure 2: Annual event study, food insecurity
+# Figure 2: Annual event study
 pdf(file.path(OUT, "fig2_eventstudy.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
 iplot(es, main = "", xlab = "Year", ylab = "Informal x year (ref. 2021)")
 dev.off()
 
-
-# Shared: Migrant-household sample for the first stage
-fs <- pan |> 
-  filter(has_abroad == 1) |> 
-  haven::zap_labels()
+# Shared: first-stage sample
+fs <- pan |> filter(has_abroad == 1) |> haven::zap_labels()
 fs$ru <- as.integer(fs$hhid %in% russia)
 
-
-# Figure A1: First stage, annual
+# Figure A1: First stage annual
 esA1 <- feols(received_remit ~ i(year, ru, ref = 2021) | hhid + year,
               cluster = ~hhid, data = fs)
-
 pdf(file.path(OUT, "figA1_firststage_annual.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
 iplot(esA1, main = "", xlab = "Year", ylab = "Russia-exposed x year (ref. 2021)")
 dev.off()
 
-
-# Figure A2: First stage, monthly
+# Figure A2: First stage monthly
 esA2 <- feols(received_remit ~ i(event_time, ru, ref = -1) | hhid + round,
               cluster = ~hhid, data = subset(fs, event_time >= -6 & event_time <= 12))
-
 pdf(file.path(OUT, "figA2_firststage_monthly.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
 iplot(esA2, main = "", xlab = "Months relative to the invasion",
       ylab = "Russia-exposed x month")
 dev.off()
 
-
-# Figure A3: Reported return migration, by quarter
+# Figure A3: Return migration
 ret <- ind |>
   mutate(returned = as.integer(mig_return_hh == 1)) |>
   group_by(hhid, round) |>
@@ -82,7 +68,7 @@ ret <- ind |>
 
 r3 <- hhf |>
   mutate(date = as.Date(date_start),
-         qtr  = as.Date(cut(date, "quarter"))) |>
+         qtr = as.Date(cut(date, "quarter"))) |>
   select(hhid, round, qtr) |>
   left_join(ret, by = c("hhid", "round")) |>
   mutate(returned = ifelse(is.na(returned), 0, returned)) |>
@@ -93,29 +79,23 @@ r3 <- hhf |>
 
 pdf(file.path(OUT, "figA3_return_migration.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
-
 with(subset(r3, ru == 1),
      plot(qtr, rate, type = "o", pch = 15, cex = 0.6, col = "#CC3311", lwd = 1.4,
           ylim = c(0, max(r3$rate, na.rm = TRUE) * 1.05),
           xlab = "Quarter", ylab = "Share reporting a returned migrant"))
-
 with(subset(r3, ru == 0),
      lines(qtr, rate, type = "o", pch = 16, cex = 0.6, col = "#4477AA", lwd = 1.4))
-
 abline(v = as.Date("2022-02-24"), lty = 2, col = "grey40")
 abline(v = as.Date("2022-09-21"), lty = 3, col = "black")
-
 legend("topleft", bty = "n", cex = 0.8, lty = 1, pch = c(15, 16),
        col = c("#CC3311", "#4477AA"),
        legend = c("Russia-exposed migrant households",
                   "Other-destination migrant households"))
 dev.off()
 
-
-# Figure A4: Secondary outcomes, annual event studies
+# Figure A4: Secondary outcomes
 pdf(file.path(OUT, "figA4_secondary.pdf"), width = W, height = 3.2)
 par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
-
 for (y in c("reduced_food", "forgone_med")) {
   e <- feols(as.formula(paste0(y, " ~ i(year, informal, ref = 2021) | hhid + year")),
              cluster = ~hhid, data = h)
@@ -125,11 +105,9 @@ for (y in c("reduced_food", "forgone_med")) {
 }
 dev.off()
 
-
-# Figure A5: Remittance value, monthly
-esA5 <- feols(lifeline_des ~ i(event_time, informal, ref = -1) | hhid + round,
+# Figure A5: Remittance value monthly
+esA5 <- feols(remit_ihs_des ~ i(event_time, informal, ref = -1) | hhid + round,
               cluster = ~hhid, data = subset(h, event_time >= -6 & event_time <= 18))
-
 pdf(file.path(OUT, "figA5_income_channel.pdf"), width = W, height = H)
 par(mar = c(4, 4, 1, 1))
 iplot(esA5, main = "", xlab = "Months relative to the invasion",
