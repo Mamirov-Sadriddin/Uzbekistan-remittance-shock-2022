@@ -1,3 +1,4 @@
+# analysis.R
 # Replication code for the thesis
 # Run from top to bottom.
 
@@ -14,6 +15,9 @@ SHOCK  <- 43
 ind <- read_sav(file.path(PATH, "l2cu_cati_individual_data_82.sav"))
 hhf <- read_sav(file.path(PATH, "l2cu_cati_household_data_82.sav"))
 cat("Raw files loaded\n")
+
+safe_max <- function(x) if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE)
+fx <- c(`1` = 1/11500, `2` = 1, `3` = 1.10, `4` = 1/85, `5` = 1/460, `96` = NA)
 
 # 1. Treatment definition (majority rule)
 bm <- ind |>
@@ -40,10 +44,6 @@ print(c(informal = sum(grp$informal), formal = sum(grp$informal == 0),
         total = nrow(grp)))
 
 # 2. Household-round panel
-safe_max <- function(x) if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE)
-
-fx <- c(`1` = 1/11500, `2` = 1, `3` = 1.10, `4` = 1/85, `5` = 1/460, `96` = NA)
-
 mig <- ind |>
   mutate(working_abroad = as.integer(!is.na(mig_living_country) & mig_living_work == 1),
          has_abroad     = as.integer(mig_living_hh == 1 | !is.na(mig_living_country)),
@@ -89,182 +89,13 @@ pan <- hhf |>
 h <- pan |> inner_join(grp, by = "hhid") |> mutate(inf_post = informal * post)
 h <- haven::zap_labels(h)
 
-# winsorize remittance amount at 99th percentile (zeros included)
 cap <- quantile(h$remit_usd, 0.99, na.rm = TRUE)
 h$remit_ihs <- asinh(pmin(h$remit_usd, cap))
 
 cat("\nPanel\n")
 print(c(households = n_distinct(h$hhid), observations = nrow(h)))
 
-# 3. De-seasonalization
-deseason <- function(d, y, grp = "informal") {
-  key  <- interaction(d[[grp]], d$month, drop = TRUE)
-  seas <- tapply(ifelse(d$post == 0, d[[y]], NA), key, mean, na.rm = TRUE)
-  d[[paste0(y, "_des")]] <- as.numeric(d[[y]] - seas[as.character(key)])
-  d
-}
-
-depool <- function(d, y) {
-  mm <- tapply(ifelse(d$post == 0, d[[y]], NA), d$month, mean, na.rm = TRUE)
-  d[[paste0(y, "_pool")]] <- as.numeric(d[[y]] - mm[as.character(d$month)])
-  d
-}
-
-for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
-            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
-  h <- deseason(h, v)
-  h <- depool(h, v)
-}
-
-# 4. Table 2: main result
-cat("\n\n=== Table 2: main result ===\n")
-
-m1 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h)
-m2 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h,
-            weights = ~popw)
-
-h$inf_inv <- h$informal * (h$round >= 43 & h$round <= 49)
-h$inf_mob <- h$informal * (h$round >= 50 & h$round <= 55)
-h$inf_23  <- h$informal * (h$round >= 56 & h$round <= 61)
-h$inf_24  <- h$informal * (h$round >= 62)
-m3 <- feols(food_insuff_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
-            cluster = ~hhid, data = h)
-
-# column (4): controls for migration channel and education
-hC <- h |>
-  left_join(select(D, hhid, unoff, max_educ), by = "hhid") |>
-  mutate(unoff_p = unoff * post, educ_p = max_educ * post)
-m4 <- feols(food_insuff_des ~ inf_post + unoff_p + educ_p | hhid + round,
-            cluster = ~hhid, data = hC)
-
-etable(m1, m2, m3, m4)
-
-# de-seasonalization like-for-like (Section 6.5)
-m_raw <- feols(food_insuff ~ inf_post | hhid + round, cluster = ~hhid, data = h)
-cat("\nDe-seasonalization, like-for-like\n")
-cat(sprintf("  unadjusted outcome, same specification : %+.4f (%.4f)\n",
-            coef(m_raw)["inf_post"], se(m_raw)["inf_post"]))
-cat(sprintf("  de-seasonalized outcome               : %+.4f (%.4f)\n",
-            coef(m1)["inf_post"], se(m1)["inf_post"]))
-cat(sprintf("  difference attributable to seasonality: %+.4f\n",
-            coef(m1)["inf_post"] - coef(m_raw)["inf_post"]))
-
-# 5. Event study (annual)
-cat("\n\n=== Figure 2 / Table B.7: annual event study ===\n")
-es <- feols(food_insuff ~ i(year, informal, ref = 2021) | hhid + year,
-            cluster = ~hhid, data = h)
-print(coeftable(es))
-
-# 6. Welfare battery
-cat("\n\n=== Table B.2: welfare outcomes ===\n")
-models <- list(
-  food    = feols(food_insuff_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  redfood = feols(reduced_food_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  medical = feols(forgone_med_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  utility = feols(unable_util      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  water   = feols(water_disrupt    ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  coping  = feols(coping_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
-etable(models)
-
-# 7. Romano-Wolf correction (six outcomes)
-cat("\n\n=== Table B.2: Romano-Wolf correction ===\n")
-rw_randomization <- function(h, outcomes, B = 2000) {
-  dat <- h["hhid"]
-  dat$round <- h$round
-  dat$post  <- h$post
-  for (y in outcomes) {
-    mm <- tapply(ifelse(h$post == 0, h[[y]], NA), h$month, mean, na.rm = TRUE)
-    dat[[paste0(y, "_p")]] <- as.numeric(h[[y]] - mm[as.character(h$month)])
-  }
-  ids  <- unique(dat$hhid)
-  inf0 <- h$informal[match(ids, h$hhid)]
-  tvec <- function(iv) {
-    d <- dat
-    d$ip <- iv[match(d$hhid, ids)] * d$post
-    sapply(outcomes, function(y)
-      coeftable(feols(as.formula(paste0(y, "_p ~ ip | hhid + round")),
-                      data = d, cluster = ~hhid))["ip", "t value"])
-  }
-  obs  <- tvec(inf0)
-  perm <- t(replicate(B, abs(tvec(sample(inf0)))))
-  ord  <- order(-abs(obs))
-  rw   <- setNames(numeric(length(obs)), names(obs))
-  rem  <- ord
-  prev <- 0
-  for (k in ord) {
-    p <- mean(apply(perm[, rem, drop = FALSE], 1, max) >= abs(obs[k]))
-    rw[k] <- prev <- max(p, prev)
-    rem <- setdiff(rem, k)
-  }
-  data.frame(outcome = names(obs), t = round(obs, 2), romano_wolf_p = round(rw, 3))
-}
-
-outs <- c("food_insuff", "reduced_food", "forgone_med",
-          "unable_util", "water_disrupt", "coping")
-print(rw_randomization(h, outs, B = 2000))
-
-# 8. Pre-trend tests
-cat("\n\n=== Pre-shock trend tests (11 leads) ===\n")
-esc <- function(x) gsub("([.^$|?*+()\\[\\]])", "\\\\\\1", x)
-pretrend <- function(d, y, g = "informal") {
-  W <- d |> filter(event_time >= -12, event_time <= 18)
-  r <- feols(as.formula(paste0(y, " ~ i(event_time, ", g, ", ref = -1) | hhid + round")),
-             cluster = ~hhid, data = W)
-  nm <- grep("event_time::-", names(coef(r)), value = TRUE)
-  list(p = wald(r, keep = paste0("^", esc(nm), "$"), print = FALSE)$p, k = length(nm))
-}
-for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
-            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
-  a <- pretrend(h, paste0(v, "_des"))
-  b <- pretrend(h, paste0(v, "_pool"))
-  cat(sprintf("  %-16s group-specific p = %.3f   pooled p = %.3f   (%d leads)\n",
-              v, a$p, b$p, a$k))
-}
-
-# 9. Mechanism (income channel)
-cat("\n\n=== Table B.3: the income chain ===\n")
-mech <- list(
-  employed = feols(working_abroad_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  abroad   = feols(has_abroad_des     ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  sends    = feols(sends_des          ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  value    = feols(remit_ihs_des      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-  channel  = feols(lifeline_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
-etable(mech)
-
-cat("\n=== Table B.5: mechanism by phase ===\n")
-print(feols(lifeline_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
-            cluster = ~hhid, data = h))
-
-# 10. Missing migrant records
-cat("\n\n=== Missing migrant records ===\n")
-n_miss <- sum(is.na(h$working_abroad_raw))
-cat(sprintf("  household-rounds with no migrant record: %d of %d (%.1f%%)\n",
-            n_miss, nrow(h), 100 * n_miss / nrow(h)))
-h$miss <- as.numeric(is.na(h$working_abroad_raw))
-m_miss <- feols(miss ~ inf_post | hhid + round, cluster = ~hhid, data = h)
-cat(sprintf("  differential non-response: %+.4f (%.4f), p = %.3f\n",
-            coef(m_miss)["inf_post"], se(m_miss)["inf_post"], pvalue(m_miss)["inf_post"]))
-
-# 11. Permutation test
-cat("\n\n=== Permutation test ===\n")
-perm_test <- function(h, y, B = 2000) {
-  ids  <- unique(h$hhid)
-  inf0 <- h$informal[match(ids, h$hhid)]
-  d    <- data.frame(yv = h[[y]], hhid = h$hhid, round = h$round, post = h$post)
-  d$ip <- inf0[match(d$hhid, ids)] * d$post
-  obs  <- coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
-  null <- replicate(B, {
-    d$ip <- sample(inf0)[match(d$hhid, ids)] * d$post
-    coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
-  })
-  c(observed = unname(obs), perm_p = mean(abs(null) >= abs(obs)),
-    null_mean = mean(null), null_sd = sd(null))
-}
-cat("\n  (a) pooled calendar-month means (label-free)\n")
-print(round(perm_test(h, "food_insuff_pool"), 4))
-
-# 12. Baseline balance (Table 1)
-cat("\n\n=== Table 1: baseline balance ===\n")
+# 3. Baseline covariates (D) – needed for Table 2 controls and balance
 dem <- ind |>
   filter(round %in% B) |>
   mutate(usd_b  = ifelse(mig_living_remittance == 1,
@@ -305,9 +136,176 @@ D <- grp |>
   left_join(chan, by = "hhid") |>
   left_join(hb,   by = "hhid") |>
   mutate(received_remit = as.integer(remit_usd_b > 0))
-
 D$remit_usd_month <- D$remit_usd_b / D$n_rounds_b
 
+# 4. De-seasonalization
+deseason <- function(d, y, grp = "informal") {
+  key  <- interaction(d[[grp]], d$month, drop = TRUE)
+  seas <- tapply(ifelse(d$post == 0, d[[y]], NA), key, mean, na.rm = TRUE)
+  d[[paste0(y, "_des")]] <- as.numeric(d[[y]] - seas[as.character(key)])
+  d
+}
+
+depool <- function(d, y) {
+  mm <- tapply(ifelse(d$post == 0, d[[y]], NA), d$month, mean, na.rm = TRUE)
+  d[[paste0(y, "_pool")]] <- as.numeric(d[[y]] - mm[as.character(d$month)])
+  d
+}
+
+for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
+            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
+  h <- deseason(h, v)
+  h <- depool(h, v)
+}
+
+# 5. Table 2: main result
+cat("\n\n=== Table 2: main result ===\n")
+
+m1 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h)
+m2 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h,
+            weights = ~popw)
+
+h$inf_inv <- h$informal * (h$round >= 43 & h$round <= 49)
+h$inf_mob <- h$informal * (h$round >= 50 & h$round <= 55)
+h$inf_23  <- h$informal * (h$round >= 56 & h$round <= 61)
+h$inf_24  <- h$informal * (h$round >= 62)
+m3 <- feols(food_insuff_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
+            cluster = ~hhid, data = h)
+
+hC <- h |>
+  left_join(select(D, hhid, unoff, max_educ), by = "hhid") |>
+  mutate(unoff_p = unoff * post, educ_p = max_educ * post)
+m4 <- feols(food_insuff_des ~ inf_post + unoff_p + educ_p | hhid + round,
+            cluster = ~hhid, data = hC)
+
+etable(m1, m2, m3, m4)
+
+m_raw <- feols(food_insuff ~ inf_post | hhid + round, cluster = ~hhid, data = h)
+cat("\nDe-seasonalization, like-for-like\n")
+cat(sprintf("  unadjusted outcome, same specification : %+.4f (%.4f)\n",
+            coef(m_raw)["inf_post"], se(m_raw)["inf_post"]))
+cat(sprintf("  de-seasonalized outcome               : %+.4f (%.4f)\n",
+            coef(m1)["inf_post"], se(m1)["inf_post"]))
+cat(sprintf("  difference attributable to seasonality: %+.4f\n",
+            coef(m1)["inf_post"] - coef(m_raw)["inf_post"]))
+
+# 6. Event study (annual)
+cat("\n\n=== Figure 2 / Table B.7: annual event study ===\n")
+es <- feols(food_insuff ~ i(year, informal, ref = 2021) | hhid + year,
+            cluster = ~hhid, data = h)
+print(coeftable(es))
+
+# 7. Welfare battery (Table B.2)
+cat("\n\n=== Table B.2: welfare outcomes ===\n")
+models <- list(
+  food    = feols(food_insuff_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  redfood = feols(reduced_food_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  medical = feols(forgone_med_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  utility = feols(unable_util      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  water   = feols(water_disrupt    ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  coping  = feols(coping_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
+etable(models)
+
+# 8. Romano-Wolf correction (six outcomes)
+cat("\n\n=== Table B.2: Romano-Wolf correction ===\n")
+rw_randomization <- function(h, outcomes, B = 2000) {
+  dat <- h["hhid"]
+  dat$round <- h$round
+  dat$post  <- h$post
+  for (y in outcomes) {
+    mm <- tapply(ifelse(h$post == 0, h[[y]], NA), h$month, mean, na.rm = TRUE)
+    dat[[paste0(y, "_p")]] <- as.numeric(h[[y]] - mm[as.character(h$month)])
+  }
+  ids  <- unique(dat$hhid)
+  inf0 <- h$informal[match(ids, h$hhid)]
+  tvec <- function(iv) {
+    d <- dat
+    d$ip <- iv[match(d$hhid, ids)] * d$post
+    sapply(outcomes, function(y)
+      coeftable(feols(as.formula(paste0(y, "_p ~ ip | hhid + round")),
+                      data = d, cluster = ~hhid))["ip", "t value"])
+  }
+  obs  <- tvec(inf0)
+  perm <- t(replicate(B, abs(tvec(sample(inf0)))))
+  ord  <- order(-abs(obs))
+  rw   <- setNames(numeric(length(obs)), names(obs))
+  rem  <- ord
+  prev <- 0
+  for (k in ord) {
+    p <- mean(apply(perm[, rem, drop = FALSE], 1, max) >= abs(obs[k]))
+    rw[k] <- prev <- max(p, prev)
+    rem <- setdiff(rem, k)
+  }
+  data.frame(outcome = names(obs), t = round(obs, 2), romano_wolf_p = round(rw, 3))
+}
+
+outs <- c("food_insuff", "reduced_food", "forgone_med",
+          "unable_util", "water_disrupt", "coping")
+print(rw_randomization(h, outs, B = 2000))
+
+# 9. Pre-trend tests
+cat("\n\n=== Pre-shock trend tests (11 leads) ===\n")
+esc <- function(x) gsub("([.^$|?*+()\\[\\]])", "\\\\\\1", x)
+pretrend <- function(d, y, g = "informal") {
+  W <- d |> filter(event_time >= -12, event_time <= 18)
+  r <- feols(as.formula(paste0(y, " ~ i(event_time, ", g, ", ref = -1) | hhid + round")),
+             cluster = ~hhid, data = W)
+  nm <- grep("event_time::-", names(coef(r)), value = TRUE)
+  if (length(nm) == 0) return(list(p = 1, k = 0))
+  list(p = wald(r, keep = paste0("^", esc(nm), "$"), print = FALSE)$p, k = length(nm))
+}
+for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
+            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
+  a <- pretrend(h, paste0(v, "_des"))
+  b <- pretrend(h, paste0(v, "_pool"))
+  cat(sprintf("  %-16s group-specific p = %.3f   pooled p = %.3f   (%d leads)\n",
+              v, a$p, b$p, a$k))
+}
+
+# 10. Mechanism (income chain)
+cat("\n\n=== Table B.3: the income chain ===\n")
+mech <- list(
+  employed = feols(working_abroad_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  abroad   = feols(has_abroad_des     ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  sends    = feols(sends_des          ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  value    = feols(remit_ihs_des      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  channel  = feols(lifeline_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
+etable(mech)
+
+cat("\n=== Table B.5: mechanism by phase ===\n")
+print(feols(lifeline_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
+            cluster = ~hhid, data = h))
+
+# 11. Missing migrant records
+cat("\n\n=== Missing migrant records ===\n")
+n_miss <- sum(is.na(h$working_abroad_raw))
+cat(sprintf("  household-rounds with no migrant record: %d of %d (%.1f%%)\n",
+            n_miss, nrow(h), 100 * n_miss / nrow(h)))
+h$miss <- as.numeric(is.na(h$working_abroad_raw))
+m_miss <- feols(miss ~ inf_post | hhid + round, cluster = ~hhid, data = h)
+cat(sprintf("  differential non-response: %+.4f (%.4f), p = %.3f\n",
+            coef(m_miss)["inf_post"], se(m_miss)["inf_post"], pvalue(m_miss)["inf_post"]))
+
+# 12. Permutation test
+cat("\n\n=== Permutation test ===\n")
+perm_test <- function(h, y, B = 2000) {
+  ids  <- unique(h$hhid)
+  inf0 <- h$informal[match(ids, h$hhid)]
+  d    <- data.frame(yv = h[[y]], hhid = h$hhid, round = h$round, post = h$post)
+  d$ip <- inf0[match(d$hhid, ids)] * d$post
+  obs  <- coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
+  null <- replicate(B, {
+    d$ip <- sample(inf0)[match(d$hhid, ids)] * d$post
+    coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
+  })
+  c(observed = unname(obs), perm_p = mean(abs(null) >= abs(obs)),
+    null_mean = mean(null), null_sd = sd(null))
+}
+cat("\n  (a) pooled calendar-month means (label-free)\n")
+print(round(perm_test(h, "food_insuff_pool"), 4))
+
+# 13. Baseline balance (Table 1)
+cat("\n\n=== Table 1: baseline balance ===\n")
 balance <- function(d, vars) {
   do.call(rbind, lapply(vars, function(v) {
     a <- d[[v]][d$informal == 1]; a <- a[is.finite(a)]
@@ -324,7 +322,7 @@ print(balance(D, c("hhsize_b", "mean_age", "max_educ", "share_child", "share_fem
                    "got_wage", "food_insec", "reduced_food", "borrowed",
                    "used_savings", "sold_assets")))
 
-# 13. Alternative definitions
+# 14. Alternative definitions (Table B.8)
 cat("\n\n=== Table B.8: alternative definitions ===\n")
 alt <- bm |>
   filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
@@ -350,12 +348,12 @@ print(rbind(
                        mutate(informal = as.integer(ninf >= 1)) |> select(hhid, informal))
 ))
 
-# 14. Coping (excluded on identification grounds)
+# 15. Coping (excluded on identification grounds)
 cat("\n\n=== Coping (excluded) ===\n")
 print(feols(coping_des ~ inf_post | hhid + round, cluster = ~hhid, data = h))
 cat(sprintf("  pre-shock trend test p = %.4f\n", pretrend(h, "coping_des")$p))
 
-# 15. Aggregate effect (Table B.4) and first stage
+# 16. Aggregate effect (Table B.4) and first stage
 cat("\n\n=== Table B.4: aggregate effect ===\n")
 dest <- ind |>
   filter(round %in% B, !is.na(mig_living_country)) |>
@@ -392,7 +390,7 @@ es_fs <- feols(received_remit ~ i(year, ru, ref = 2021) | hhid + year,
                cluster = ~hhid, data = fs)
 print(round(coeftable(es_fs), 4))
 
-# 16. Baseline window robustness (Table B.6)
+# 17. Baseline window robustness (Table B.6)
 cat("\n\n=== Table B.6: baseline window robustness ===\n")
 run_window <- function(lo, hi) {
   W <- ind |> filter(round %in% lo:hi, !is.na(mig_living_country)) |>
@@ -423,7 +421,7 @@ run_window <- function(lo, hi) {
 wins <- list(c(39, 42), c(37, 42), c(34, 42), c(31, 42), c(25, 42), c(21, 42))
 print(do.call(rbind, lapply(wins, function(w) run_window(w[1], w[2]))), row.names = FALSE)
 
-# 17. Raw means (Table B.1)
+# 18. Raw means (Table B.1)
 cat("\n\n=== Table B.1: raw means ===\n")
 raw <- h |>
   group_by(informal, post) |>
@@ -436,7 +434,7 @@ cat(sprintf("\n  informal pre-war food insecurity %.3f, post %.3f, ratio %.2f\n"
             raw$food_insuff[raw$informal == 1 & raw$post == 1] /
             raw$food_insuff[raw$informal == 1 & raw$post == 0]))
 
-# 18. Heterogeneity by remittance dependence (Table B.9)
+# 19. Heterogeneity by remittance dependence (Table B.9)
 cat("\n\n=== Table B.9: dependence split ===\n")
 dep <- h |> filter(round %in% B) |>
   group_by(hhid) |> summarise(dep = mean(received_remit == 1), .groups = "drop")
@@ -450,7 +448,7 @@ for (lab in c("above", "at or below")) {
               coef(r)["inf_post"], se(r)["inf_post"], nrow(s)))
 }
 
-# 19. Propensity score matching
+# 20. Propensity score matching
 cat("\n\n=== Propensity score matching ===\n")
 vars <- c("mean_age", "max_educ", "share_female", "hhsize_b", "food_insec")
 Dm <- D[complete.cases(D[c("informal", vars)]), ]
@@ -472,7 +470,7 @@ rm_ <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = 
 cat(sprintf("  %d matched pairs, %+.4f (%.4f)\n", length(pairs),
             coef(rm_)["inf_post"], se(rm_)["inf_post"]))
 
-# 20. Observable confounders and Oster
+# 21. Observable confounders and Oster
 cat("\n\n=== Observable confounders ===\n")
 ho <- h |>
   left_join(select(D, hhid, max_educ, share_female, mean_age, unoff, hhsize_b, got_wage),
@@ -517,7 +515,7 @@ res <- t(sapply(c(1.3, 2.0), function(k) oster(b0, b1, R0, R1, k)))
 rownames(res) <- c("Rmax = 1.3 x R1", "Rmax = 2.0 x R1")
 print(round(res, 3))
 
-# 21. Time and placebo checks
+# 22. Time and placebo checks
 cat("\n\n=== Time and placebo checks ===\n")
 cat(sprintf("  COVID placebo (2020): %+.4f\n", coef(es)["year::2020:informal"]))
 h$inf_pre_mob  <- h$informal * (h$round >= 43 & h$round <= 49)
@@ -530,7 +528,7 @@ r19 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = 
 cat(sprintf("  dropping 2018: %+.4f (%.4f), obs %d\n",
             coef(r19)["inf_post"], se(r19)["inf_post"], nrow(h19)))
 
-# 22. Panel coverage and attrition
+# 23. Panel coverage and attrition
 cat("\n\n=== Panel coverage ===\n")
 cvg <- h |> group_by(hhid) |>
   summarise(n_all = n(), n_pre = sum(post == 0), n_post = sum(post == 1),
@@ -550,7 +548,7 @@ cat("  rounds observed  :", tt("n_all"), "\n")
 cat("  post-shock rounds:", tt("n_post"), "\n")
 cat("  in final 12      :", tt("last12"), "\n")
 
-# 23. Appendix C: sample construction and variable definitions
+# 24. Appendix C: sample construction and variable definitions
 cat("\n\n=== Appendix C: sample construction ===\n")
 bm_all <- ind |> filter(round %in% B, !is.na(mig_living_country)) |>
   mutate(is_ru = as.integer(mig_living_country == 1))
