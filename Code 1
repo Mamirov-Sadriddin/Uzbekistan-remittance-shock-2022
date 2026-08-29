@@ -1,117 +1,132 @@
-# Remittance Shocks and Household Welfare in Uzbekistan
+## File 2: `analysis.R`
 
-# Run this file from top to bottom. It rebuilds the sample from the raw
-# L2CU files and reproduces every number reported in the thesis. L2CU data can
-# be obtained from the World Bank Microdata Library.
+```r
+# analysis.R
+# Replication code for the thesis
+# Run from top to bottom.
 
-# Requirements: haven, dplyr, fixest
-
-# 0. Setup
 library(haven)
 library(dplyr)
 library(fixest)
 
-# Lock the random seed to ensure Romano-Wolf and permutation p-values match exactly
 set.seed(2024)
 
-PATH <- "~/Downloads/"                       # Folder holding the two .sav files
-B    <- 39:42                                # Baseline window, last 4 pre-war rounds
-SHOCK<- 43                                   # Round 43 = March 2022
+PATH   <- "~/Downloads/"
+B      <- 39:42
+SHOCK  <- 43
 
 ind <- read_sav(file.path(PATH, "l2cu_cati_individual_data_82.sav"))
 hhf <- read_sav(file.path(PATH, "l2cu_cati_household_data_82.sav"))
 cat("Raw files loaded\n")
 
-
-# 1. Treatment (majority rule)
-# Households whose baseline migrants are mostly in Russia, then split by
-# whether the majority of those migrant records report informal work.
+# 1. Treatment definition (majority rule)
 bm <- ind |>
-    filter(round %in% B, !is.na(mig_living_country)) |>
-    mutate(is_ru = as.integer(mig_living_country == 1))
+  filter(round %in% B, !is.na(mig_living_country)) |>
+  mutate(is_ru = as.integer(mig_living_country == 1))
 
 russia <- bm |>
-    group_by(hhid) |>
-    summarise(ru = mean(is_ru), .groups = "drop") |>
-    filter(ru > 0.5) |>
-    pull(hhid)
+  group_by(hhid) |>
+  summarise(ru = mean(is_ru), .groups = "drop") |>
+  filter(ru > 0.5) |>
+  pull(hhid)
 
 grp <- bm |>
-    filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
-    group_by(hhid) |>
-    summarise(noff = sum(mig_living_work_official == 1),
-              ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
-    filter(hhid %in% russia, noff != ninf) |>
-    mutate(informal = as.integer(ninf > noff)) |>
-    select(hhid, informal)
+  filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(noff = sum(mig_living_work_official == 1),
+            ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
+  filter(hhid %in% russia, noff != ninf) |>
+  mutate(informal = as.integer(ninf > noff)) |>
+  select(hhid, informal)
 
-cat("\nSample (expected: informal 53, formal 137, total 190)\n")
-print(c(informal = sum(grp$informal), formal = sum(grp$informal == 0), total = nrow(grp)))
+cat("\nSample\n")
+print(c(informal = sum(grp$informal), formal = sum(grp$informal == 0),
+        total = nrow(grp)))
 
-
-# 2. Household-Round Panel
-# Migrant-side variables, aggregated to household x round.
-# Using a safe_max helper to avoid -Inf warnings when all values are NA.
+# 2. Household-round panel
 safe_max <- function(x) if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE)
 
+fx <- c(`1` = 1/11500, `2` = 1, `3` = 1.10, `4` = 1/85, `5` = 1/460, `96` = NA)
+
 mig <- ind |>
-    mutate(working_abroad = as.integer(!is.na(mig_living_country) & mig_living_work == 1),
-           has_abroad     = as.integer(mig_living_hh == 1 | !is.na(mig_living_country)),
-           sends          = as.integer(mig_living_remittance == 1),
-           remit_hh       = as.integer(remittance_hh == 1),
-           lifeline       = as.integer(!is.na(mig_living_country) & mig_living_work == 1 &
-                                           mig_living_remittance == 1)) |>
-    group_by(hhid, round) |>
-    summarise(working_abroad = safe_max(working_abroad),
-              has_abroad     = safe_max(has_abroad),
-              sends          = safe_max(sends),
-              remit_hh       = safe_max(remit_hh),
-              lifeline       = safe_max(lifeline), .groups = "drop")
+  mutate(working_abroad = as.integer(!is.na(mig_living_country) & mig_living_work == 1),
+         has_abroad     = as.integer(mig_living_hh == 1 | !is.na(mig_living_country)),
+         sends          = as.integer(mig_living_remittance == 1),
+         remit_hh       = as.integer(remittance_hh == 1),
+         lifeline       = as.integer(!is.na(mig_living_country) & mig_living_work == 1 &
+                                      mig_living_remittance == 1),
+         usd            = ifelse(mig_living_remittance == 1,
+                                 mig_living_remittance_amount *
+                                 fx[as.character(mig_living_remittance_currency)], 0)) |>
+  group_by(hhid, round) |>
+  summarise(working_abroad = safe_max(working_abroad),
+            has_abroad     = safe_max(has_abroad),
+            sends          = safe_max(sends),
+            remit_hh       = safe_max(remit_hh),
+            lifeline       = safe_max(lifeline),
+            remit_usd      = sum(usd, na.rm = TRUE), .groups = "drop")
 
 pan <- hhf |>
-    mutate(date         = as.Date(date_start),
-           month        = as.integer(format(date, "%m")),
-           year         = as.integer(format(date, "%Y")),
-           post         = as.integer(round >= SHOCK),
-           event_time   = round - SHOCK,
-           food_insuff  = as.numeric(food_past30d        == 2),
-           reduced_food = as.numeric(consumption_past30d == 1),
-           forgone_med  = as.numeric(medical_past30d     == 1),
-           unable_util  = as.numeric(utility_past30d     == 1),
-           water_disrupt= as.numeric(water_disruption    == 1),
-           coping       = as.numeric(loan_past30d == 1 | savings_past30d == 1 | assets_past30d == 1)) |>
-    select(hhid, round, month, year, post, event_time, popw, hhsize,
-           food_insuff, reduced_food, forgone_med, unable_util, water_disrupt, coping) |>
-    left_join(mig, by = c("hhid", "round")) |>
-    mutate(across(c(working_abroad, has_abroad, sends, remit_hh, lifeline),
-                  ~ifelse(is.na(.x), 0, .x)),
-           received_remit = as.integer(sends == 1 | remit_hh == 1))
+  mutate(date          = as.Date(date_start),
+         month         = as.integer(format(date, "%m")),
+         year          = as.integer(format(date, "%Y")),
+         post          = as.integer(round >= SHOCK),
+         event_time    = round - SHOCK,
+         food_insuff   = as.numeric(food_past30d == 2),
+         reduced_food  = as.numeric(consumption_past30d == 1),
+         forgone_med   = as.numeric(medical_past30d == 1),
+         unable_util   = as.numeric(utility_past30d == 1),
+         water_disrupt = as.numeric(water_disruption == 1),
+         coping        = as.numeric(loan_past30d == 1 | savings_past30d == 1 |
+                                    assets_past30d == 1)) |>
+  select(hhid, round, month, year, post, event_time, popw, hhsize,
+         food_insuff, reduced_food, forgone_med, unable_util, water_disrupt,
+         coping) |>
+  left_join(mig, by = c("hhid", "round")) |>
+  mutate(working_abroad_raw = working_abroad,
+         lifeline_raw       = lifeline) |>
+  mutate(across(c(working_abroad, has_abroad, sends, remit_hh, lifeline),
+                ~ifelse(is.na(.x), 0, .x)),
+         remit_usd      = ifelse(is.na(remit_usd), 0, remit_usd),
+         received_remit = as.integer(sends == 1 | remit_hh == 1))
 
 h <- pan |> inner_join(grp, by = "hhid") |> mutate(inf_post = informal * post)
 h <- haven::zap_labels(h)
-cat("\nPanel (expected: 190 households, 14,128 observations)\n")
+
+# winsorize remittance amount at 99th percentile (zeros included)
+cap <- quantile(h$remit_usd, 0.99, na.rm = TRUE)
+h$remit_ihs <- asinh(pmin(h$remit_usd, cap))
+
+cat("\nPanel\n")
 print(c(households = n_distinct(h$hhid), observations = nrow(h)))
 
-
 # 3. De-seasonalization
-# Subtract the pre-shock group x calendar-month mean.
 deseason <- function(d, y, grp = "informal") {
-    key  <- interaction(d[[grp]], d$month, drop = TRUE)
-    seas <- tapply(ifelse(d$post == 0, d[[y]], NA), key, mean, na.rm = TRUE)
-    d[[paste0(y, "_des")]] <- as.numeric(d[[y]] - seas[as.character(key)])
-    d
+  key  <- interaction(d[[grp]], d$month, drop = TRUE)
+  seas <- tapply(ifelse(d$post == 0, d[[y]], NA), key, mean, na.rm = TRUE)
+  d[[paste0(y, "_des")]] <- as.numeric(d[[y]] - seas[as.character(key)])
+  d
 }
 
-for (v in c("food_insuff", "reduced_food", "forgone_med", "lifeline",
-            "working_abroad", "has_abroad", "sends")) {
-    h <- deseason(h, v)
+depool <- function(d, y) {
+  mm <- tapply(ifelse(d$post == 0, d[[y]], NA), d$month, mean, na.rm = TRUE)
+  d[[paste0(y, "_pool")]] <- as.numeric(d[[y]] - mm[as.character(d$month)])
+  d
 }
 
+for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
+            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
+  h <- deseason(h, v)
+  h <- depool(h, v)
+}
 
-# 4. Main Result
-cat("\nTable 2: Main Result\n")
+# 4. Table 2: main result
+cat("\n\n=== Table 2: main result ===\n")
+
 m1 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h)
-m2 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h, weights = ~popw)
+m2 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h,
+            weights = ~popw)
+
 h$inf_inv <- h$informal * (h$round >= 43 & h$round <= 49)
 h$inf_mob <- h$informal * (h$round >= 50 & h$round <= 55)
 h$inf_23  <- h$informal * (h$round >= 56 & h$round <= 61)
@@ -119,480 +134,477 @@ h$inf_24  <- h$informal * (h$round >= 62)
 m3 <- feols(food_insuff_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
             cluster = ~hhid, data = h)
 
-etable(m1, m2, m3)
-cat("Expected  (1) +0.279 (0.042)   (2) +0.304 (0.047)\n")
-cat("Expected  (3) invasion +0.345, mobilization +0.322, 2023 +0.451, 2024+ +0.176\n")
+# column (4): controls for migration channel and education
+hC <- h |>
+  left_join(select(D, hhid, unoff, max_educ), by = "hhid") |>
+  mutate(unoff_p = unoff * post, educ_p = max_educ * post)
+m4 <- feols(food_insuff_des ~ inf_post + unoff_p + educ_p | hhid + round,
+            cluster = ~hhid, data = hC)
 
+etable(m1, m2, m3, m4)
 
-# 5. Event Study (Annual)
-cat("\nFigure 2 / Table B.8: Annual Event Study\n")
-es <- feols(food_insuff ~ i(year, informal, ref = 2021) | hhid + year, cluster = ~hhid, data = h)
+# de-seasonalization like-for-like (Section 6.5)
+m_raw <- feols(food_insuff ~ inf_post | hhid + round, cluster = ~hhid, data = h)
+cat("\nDe-seasonalization, like-for-like\n")
+cat(sprintf("  unadjusted outcome, same specification : %+.4f (%.4f)\n",
+            coef(m_raw)["inf_post"], se(m_raw)["inf_post"]))
+cat(sprintf("  de-seasonalized outcome               : %+.4f (%.4f)\n",
+            coef(m1)["inf_post"], se(m1)["inf_post"]))
+cat(sprintf("  difference attributable to seasonality: %+.4f\n",
+            coef(m1)["inf_post"] - coef(m_raw)["inf_post"]))
+
+# 5. Event study (annual)
+cat("\n\n=== Figure 2 / Table B.7: annual event study ===\n")
+es <- feols(food_insuff ~ i(year, informal, ref = 2021) | hhid + year,
+            cluster = ~hhid, data = h)
 print(coeftable(es))
-cat("Expected 2018 +0.067, 2019 +0.028, 2020 -0.002, 2022 +0.301,\n")
-cat("         2023 +0.426, 2024 +0.190, 2025 +0.083\n")
 
-
-# 6. Welfare Battery
-cat("\nTable B.9: Welfare Outcomes\n")
+# 6. Welfare battery
+cat("\n\n=== Table B.2: welfare outcomes ===\n")
 models <- list(
-    food    = feols(food_insuff_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    redfood = feols(reduced_food_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    medical = feols(forgone_med_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    utility = feols(unable_util      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    water   = feols(water_disrupt    ~ inf_post | hhid + round, cluster = ~hhid, data = h))
-
+  food    = feols(food_insuff_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  redfood = feols(reduced_food_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  medical = feols(forgone_med_des  ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  utility = feols(unable_util      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  water   = feols(water_disrupt    ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  coping  = feols(coping_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
 etable(models)
-cat("Expected +0.279 / +0.085 / -0.052 / +0.002 / -0.027\n")
 
-
-# 7. Romano-Wolf (Randomization Based)
-cat("\nTable B.9: Romano-Wolf Correction\n")
+# 7. Romano-Wolf correction (six outcomes)
+cat("\n\n=== Table B.2: Romano-Wolf correction ===\n")
 rw_randomization <- function(h, outcomes, B = 2000) {
-    dat <- h["hhid"]
-    dat$round <- h$round
-    dat$post <- h$post
-    for (y in outcomes) {
-        mm <- tapply(ifelse(h$post == 0, h[[y]], NA), h$month, mean, na.rm = TRUE)
-        dat[[paste0(y, "_p")]] <- as.numeric(h[[y]] - mm[as.character(h$month)])
-    }
-    ids <- unique(dat$hhid)
-    inf0 <- h$informal[match(ids, h$hhid)]
-
-    tvec <- function(iv) {
-        d <- dat
-        d$ip <- iv[match(d$hhid, ids)] * d$post
-        sapply(outcomes, function(y)
-            coeftable(feols(as.formula(paste0(y, "_p ~ ip | hhid + round")),
-                            data = d, cluster = ~hhid))["ip", "t value"])
-    }
-
-    obs  <- tvec(inf0)
-    perm <- t(replicate(B, abs(tvec(sample(inf0)))))
-    ord  <- order(-abs(obs))
-    rw   <- setNames(numeric(length(obs)), names(obs))
-    rem  <- ord
-    prev <- 0
-
-    for (k in ord) {
-        p <- mean(apply(perm[, rem, drop = FALSE], 1, max) >= abs(obs[k]))
-        rw[k] <- prev <- max(p, prev)
-        rem <- setdiff(rem, k)
-    }
-    data.frame(outcome = names(obs), t = round(obs, 2), romano_wolf_p = round(rw, 3))
+  dat <- h["hhid"]
+  dat$round <- h$round
+  dat$post  <- h$post
+  for (y in outcomes) {
+    mm <- tapply(ifelse(h$post == 0, h[[y]], NA), h$month, mean, na.rm = TRUE)
+    dat[[paste0(y, "_p")]] <- as.numeric(h[[y]] - mm[as.character(h$month)])
+  }
+  ids  <- unique(dat$hhid)
+  inf0 <- h$informal[match(ids, h$hhid)]
+  tvec <- function(iv) {
+    d <- dat
+    d$ip <- iv[match(d$hhid, ids)] * d$post
+    sapply(outcomes, function(y)
+      coeftable(feols(as.formula(paste0(y, "_p ~ ip | hhid + round")),
+                      data = d, cluster = ~hhid))["ip", "t value"])
+  }
+  obs  <- tvec(inf0)
+  perm <- t(replicate(B, abs(tvec(sample(inf0)))))
+  ord  <- order(-abs(obs))
+  rw   <- setNames(numeric(length(obs)), names(obs))
+  rem  <- ord
+  prev <- 0
+  for (k in ord) {
+    p <- mean(apply(perm[, rem, drop = FALSE], 1, max) >= abs(obs[k]))
+    rw[k] <- prev <- max(p, prev)
+    rem <- setdiff(rem, k)
+  }
+  data.frame(outcome = names(obs), t = round(obs, 2), romano_wolf_p = round(rw, 3))
 }
 
-outs <- c("food_insuff", "reduced_food", "forgone_med", "unable_util", "water_disrupt")
+outs <- c("food_insuff", "reduced_food", "forgone_med",
+          "unable_util", "water_disrupt", "coping")
 print(rw_randomization(h, outs, B = 2000))
-cat("Expected RW p: 0.000 / 0.021 / 0.012 / 0.925 / 0.183\n")
 
-
-# 8. Pre-Trends
-cat("\nPre-Shock Trend Tests (12 leads)\n")
-pretrend <- function(h, y) {
-    W <- h |> filter(event_time >= -12, event_time <= 18)
-    r <- feols(as.formula(paste0(y, " ~ i(event_time, informal, ref = -1) | hhid + round")),
-               cluster = ~hhid, data = W)
-    nm <- grep("event_time::-", names(coef(r)), value = TRUE)
-    wald(r, keep = paste0("^", gsub("([\\^\\$\\.\\|\\?\\*\\+\\(\\)\\[\\]])", "\\\\\\1", nm), "$"),
-         print = FALSE)$p
+# 8. Pre-trend tests
+cat("\n\n=== Pre-shock trend tests (11 leads) ===\n")
+esc <- function(x) gsub("([.^$|?*+()\\[\\]])", "\\\\\\1", x)
+pretrend <- function(d, y, g = "informal") {
+  W <- d |> filter(event_time >= -12, event_time <= 18)
+  r <- feols(as.formula(paste0(y, " ~ i(event_time, ", g, ", ref = -1) | hhid + round")),
+             cluster = ~hhid, data = W)
+  nm <- grep("event_time::-", names(coef(r)), value = TRUE)
+  list(p = wald(r, keep = paste0("^", esc(nm), "$"), print = FALSE)$p, k = length(nm))
+}
+for (v in c("food_insuff", "reduced_food", "forgone_med", "coping", "lifeline",
+            "working_abroad", "has_abroad", "sends", "remit_ihs")) {
+  a <- pretrend(h, paste0(v, "_des"))
+  b <- pretrend(h, paste0(v, "_pool"))
+  cat(sprintf("  %-16s group-specific p = %.3f   pooled p = %.3f   (%d leads)\n",
+              v, a$p, b$p, a$k))
 }
 
-for (y in c("food_insuff_des", "reduced_food_des", "forgone_med_des", "lifeline_des")) {
-    cat(sprintf("  %-20s p = %.3f\n", y, pretrend(h, y)))
-}
-cat("Expected food 0.58, reduced food 0.09, medical 0.59/0.70, income channel 0.12\n")
-
-
-# 9. Mechanism
-cat("\nTable B.3: Mechanism, the Income Chain\n")
+# 9. Mechanism (income channel)
+cat("\n\n=== Table B.3: the income chain ===\n")
 mech <- list(
-    employed = feols(working_abroad_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    abroad   = feols(has_abroad_des     ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    sends    = feols(sends_des          ~ inf_post | hhid + round, cluster = ~hhid, data = h),
-    channel  = feols(lifeline_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
-
+  employed = feols(working_abroad_des ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  abroad   = feols(has_abroad_des     ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  sends    = feols(sends_des          ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  value    = feols(remit_ihs_des      ~ inf_post | hhid + round, cluster = ~hhid, data = h),
+  channel  = feols(lifeline_des       ~ inf_post | hhid + round, cluster = ~hhid, data = h))
 etable(mech)
-cat("Expected -0.098 / -0.076 / -0.060 / -0.382 / -0.073 (composite p = 0.075 two sided)\n")
 
-cat("\nTable B.6: Mechanism by Phase\n")
+cat("\n=== Table B.5: mechanism by phase ===\n")
 print(feols(lifeline_des ~ inf_inv + inf_mob + inf_23 + inf_24 | hhid + round,
             cluster = ~hhid, data = h))
-cat("Expected -0.032 / -0.059 / -0.125 / -0.078\n")
 
+# 10. Missing migrant records
+cat("\n\n=== Missing migrant records ===\n")
+n_miss <- sum(is.na(h$working_abroad_raw))
+cat(sprintf("  household-rounds with no migrant record: %d of %d (%.1f%%)\n",
+            n_miss, nrow(h), 100 * n_miss / nrow(h)))
+h$miss <- as.numeric(is.na(h$working_abroad_raw))
+m_miss <- feols(miss ~ inf_post | hhid + round, cluster = ~hhid, data = h)
+cat(sprintf("  differential non-response: %+.4f (%.4f), p = %.3f\n",
+            coef(m_miss)["inf_post"], se(m_miss)["inf_post"], pvalue(m_miss)["inf_post"]))
 
-# 10. Permutation Test (Headline)
-# The outcome must not carry the true treatment label. The de-seasonalized
-# series used elsewhere subtracts a group x month mean built from the actual
-# informal indicator, so every placebo draw would inherit the real assignment
-# through the outcome. Here the seasonal adjustment uses pooled calendar-month
-# means instead, which is label free, and this is also what the Romano-Wolf
-# routine in section 7 does.
-cat("\nPermutation Test\n")
-
-# label-free seasonal adjustment: pooled pre-shock calendar-month means
-mm <- tapply(ifelse(h$post == 0, h$food_insuff, NA), h$month, mean, na.rm = TRUE)
-h$food_pooled <- as.numeric(h$food_insuff - mm[as.character(h$month)])
-
+# 11. Permutation test
+cat("\n\n=== Permutation test ===\n")
 perm_test <- function(h, y, B = 2000) {
-    ids  <- unique(h$hhid)
-    inf0 <- h$informal[match(ids, h$hhid)]
-    d    <- data.frame(yv = h[[y]], hhid = h$hhid, round = h$round, post = h$post)
-
-    d$ip <- inf0[match(d$hhid, ids)] * d$post
-    obs  <- coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
-
-    null <- replicate(B, {
-        d$ip <- sample(inf0)[match(d$hhid, ids)] * d$post
-        coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
-    })
-    c(observed = unname(obs), perm_p = mean(abs(null) >= abs(obs)),
-      null_mean = mean(null), null_sd = sd(null))
+  ids  <- unique(h$hhid)
+  inf0 <- h$informal[match(ids, h$hhid)]
+  d    <- data.frame(yv = h[[y]], hhid = h$hhid, round = h$round, post = h$post)
+  d$ip <- inf0[match(d$hhid, ids)] * d$post
+  obs  <- coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
+  null <- replicate(B, {
+    d$ip <- sample(inf0)[match(d$hhid, ids)] * d$post
+    coef(feols(yv ~ ip | hhid + round, data = d))["ip"]
+  })
+  c(observed = unname(obs), perm_p = mean(abs(null) >= abs(obs)),
+    null_mean = mean(null), null_sd = sd(null))
 }
+cat("\n  (a) pooled calendar-month means (label-free)\n")
+print(round(perm_test(h, "food_insuff_pool"), 4))
 
-cat("\n  (a) label-free adjustment, pooled calendar-month means\n")
-print(round(perm_test(h, "food_pooled"), 4))
-
-cat("\n  (b) for comparison, the group x month adjustment used elsewhere\n")
-cat("      (the outcome carries the true label, so this understates the p-value)\n")
-print(round(perm_test(h, "food_insuff_des"), 4))
-
-cat("\n  (c) and on the raw outcome, with no seasonal adjustment at all\n")
-print(round(perm_test(h, "food_insuff"), 4))
-
-cat("\n  All three should reject decisively. Report (a) in the thesis: it is the\n")
-cat("  only one whose null distribution is free of the treatment assignment.\n")
-
-
-# 11. Baseline Balance
-cat("\nTable 1: Baseline Balance\n")
-fx <- c(`1` = 1/11500, `2` = 1, `3` = 1.10, `4` = 1/85, `5` = 1/460, `96` = NA)
-
+# 12. Baseline balance (Table 1)
+cat("\n\n=== Table 1: baseline balance ===\n")
 dem <- ind |>
-    filter(round %in% B) |>
-    mutate(usd = ifelse(mig_living_remittance == 1,
-                        mig_living_remittance_amount * fx[as.character(mig_living_remittance_currency)], NA),
-           is_mig = as.integer(!is.na(mig_living_country))) |>
-    group_by(hhid) |>
-    summarise(mean_age = mean(age, na.rm = TRUE),
-              share_child = mean(age < 15, na.rm = TRUE),
-              share_female = mean(gender == 2, na.rm = TRUE),
-              max_educ = safe_max(education),
-              remit_usd = sum(usd, na.rm = TRUE),
-              n_migrants = sum(is_mig) / n_distinct(round),
-              .groups = "drop")
+  filter(round %in% B) |>
+  mutate(usd_b  = ifelse(mig_living_remittance == 1,
+                         mig_living_remittance_amount *
+                         fx[as.character(mig_living_remittance_currency)], NA),
+         is_mig = as.integer(!is.na(mig_living_country))) |>
+  group_by(hhid) |>
+  summarise(mean_age     = mean(age, na.rm = TRUE),
+            share_child  = mean(age < 15, na.rm = TRUE),
+            share_female = mean(gender == 2, na.rm = TRUE),
+            max_educ     = safe_max(education),
+            remit_usd_b  = sum(usd_b, na.rm = TRUE),
+            n_rounds_b   = n_distinct(round),
+            n_migrants   = sum(is_mig) / n_distinct(round),
+            .groups = "drop") |>
+  mutate(across(everything(), ~ifelse(is.infinite(.x), NA, .x)))
+
+chan <- ind |>
+  filter(round %in% B, mig_living_country == 1,
+         mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(unoff = mean(mig_living_official == 2, na.rm = TRUE), .groups = "drop")
 
 hb <- hhf |>
-    filter(round %in% B) |>
-    group_by(hhid) |>
-    summarise(hhsize = mean(hhsize, na.rm = TRUE),
-              food_insec = mean(food_past30d == 2, na.rm = TRUE),
-              reduced_food = mean(consumption_past30d == 1, na.rm = TRUE),
-              borrowed = mean(loan_past30d == 1, na.rm = TRUE),
-              used_savings = mean(savings_past30d == 1, na.rm = TRUE),
-              sold_assets = mean(assets_past30d == 1, na.rm = TRUE),
-              got_wage = mean(wage_past30d == 1, na.rm = TRUE),
-              .groups = "drop")
+  filter(round %in% B) |>
+  group_by(hhid) |>
+  summarise(hhsize_b     = mean(hhsize, na.rm = TRUE),
+            food_insec   = mean(food_past30d == 2, na.rm = TRUE),
+            reduced_food = mean(consumption_past30d == 1, na.rm = TRUE),
+            borrowed     = mean(loan_past30d == 1, na.rm = TRUE),
+            used_savings = mean(savings_past30d == 1, na.rm = TRUE),
+            sold_assets  = mean(assets_past30d == 1, na.rm = TRUE),
+            got_wage     = mean(wage_past30d == 1, na.rm = TRUE),
+            .groups = "drop")
 
 D <- grp |>
-    left_join(dem, by = "hhid") |>
-    left_join(hb, by = "hhid") |>
-    mutate(received_remit = as.integer(remit_usd > 0))
+  left_join(dem, by = "hhid") |>
+  left_join(chan, by = "hhid") |>
+  left_join(hb,   by = "hhid") |>
+  mutate(received_remit = as.integer(remit_usd_b > 0))
+
+D$remit_usd_month <- D$remit_usd_b / D$n_rounds_b
 
 balance <- function(d, vars) {
-    do.call(rbind, lapply(vars, function(v) {
-        a <- d[[v]][d$informal == 1]
-        b <- d[[v]][d$informal == 0]
-        a <- a[is.finite(a)]
-        b <- b[is.finite(b)]
-        nd <- (mean(a) - mean(b)) / sqrt((var(a) + var(b)) / 2)
-        data.frame(Variable = v,
-                   Informal = round(mean(a), 3),
-                   Formal = round(mean(b), 3),
-                   Diff = round(mean(a) - mean(b), 3),
-                   Norm_diff = round(nd, 3),
-                   p = round(t.test(a, b)$p.value, 3),
-                   Imbalance = ifelse(abs(nd) > 0.25, "*", ""))
-    }))
+  do.call(rbind, lapply(vars, function(v) {
+    a <- d[[v]][d$informal == 1]; a <- a[is.finite(a)]
+    b <- d[[v]][d$informal == 0]; b <- b[is.finite(b)]
+    nd <- (mean(a) - mean(b)) / sqrt((var(a) + var(b)) / 2)
+    data.frame(Variable = v, Informal = round(mean(a), 3), Formal = round(mean(b), 3),
+               Diff = round(mean(a) - mean(b), 3), Norm_diff = round(nd, 3),
+               p = round(t.test(a, b)$p.value, 3),
+               Imbalance = ifelse(abs(nd) > 0.25, "*", ""))
+  }))
 }
+print(balance(D, c("hhsize_b", "mean_age", "max_educ", "share_child", "share_female",
+                   "n_migrants", "received_remit", "remit_usd_b", "remit_usd_month",
+                   "got_wage", "food_insec", "reduced_food", "borrowed",
+                   "used_savings", "sold_assets")))
 
-print(balance(D, c("hhsize", "mean_age", "max_educ", "share_child", "share_female", "n_migrants",
-                   "received_remit", "remit_usd", "got_wage",
-                   "food_insec", "reduced_food", "borrowed", "used_savings", "sold_assets")))
-cat("Expected: education -0.285*, female +0.431*, wage -0.266*, remittances 0.774/0.774\n")
-
-# 12. Robustness: Definitions
-cat("\nTable B.9: Alternative Definitions\n")
+# 13. Alternative definitions
+cat("\n\n=== Table B.8: alternative definitions ===\n")
 alt <- bm |>
-    filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
-    group_by(hhid) |>
-    summarise(noff = sum(mig_living_work_official == 1),
-              ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
-    filter(hhid %in% russia)
+  filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(noff = sum(mig_living_work_official == 1),
+            ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
+  filter(hhid %in% russia)
 
 run_def <- function(g) {
-    hh <- pan |> inner_join(g, by = "hhid") |> mutate(inf_post = informal * post) |> haven::zap_labels()
-    hh <- deseason(hh, "food_insuff")
-    r <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = hh)
-    c(coef = round(coef(r)["inf_post"], 3), se = round(se(r)["inf_post"], 3),
-      informal = sum(g$informal), formal = sum(g$informal == 0))
+  hh <- pan |> inner_join(g, by = "hhid") |>
+    mutate(inf_post = informal * post) |> haven::zap_labels()
+  hh <- deseason(hh, "food_insuff")
+  r  <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = hh)
+  c(coef = round(coef(r)["inf_post"], 3), se = round(se(r)["inf_post"], 3),
+    informal = sum(g$informal), formal = sum(g$informal == 0),
+    obs = nrow(hh), pretrend = round(pretrend(hh, "food_insuff_des")$p, 3))
+}
+print(rbind(
+  majority = run_def(alt |> filter(noff != ninf) |>
+                       mutate(informal = as.integer(ninf > noff)) |> select(hhid, informal)),
+  any      = run_def(alt |> mutate(informal = as.integer(ninf >= 1)) |> select(hhid, informal)),
+  all      = run_def(alt |> filter((ninf >= 1 & noff == 0) | (noff >= 1 & ninf == 0)) |>
+                       mutate(informal = as.integer(ninf >= 1)) |> select(hhid, informal))
+))
+
+# 14. Coping (excluded on identification grounds)
+cat("\n\n=== Coping (excluded) ===\n")
+print(feols(coping_des ~ inf_post | hhid + round, cluster = ~hhid, data = h))
+cat(sprintf("  pre-shock trend test p = %.4f\n", pretrend(h, "coping_des")$p))
+
+# 15. Aggregate effect (Table B.4) and first stage
+cat("\n\n=== Table B.4: aggregate effect ===\n")
+dest <- ind |>
+  filter(round %in% B, !is.na(mig_living_country)) |>
+  mutate(is_ru = as.integer(mig_living_country == 1)) |>
+  group_by(hhid) |>
+  summarise(ru = as.integer(mean(is_ru) > 0.5), .groups = "drop")
+
+fs <- pan |>
+  filter(hhid %in% dest$hhid) |>
+  left_join(dest, by = "hhid") |>
+  mutate(ru_post = ru * post) |>
+  haven::zap_labels()
+
+for (y in c("food_insuff", "reduced_food", "forgone_med", "received_remit")) {
+  fs <- deseason(fs, y, grp = "ru")
+}
+for (y in c("food_insuff", "reduced_food", "forgone_med")) {
+  r <- feols(as.formula(paste0(y, "_des ~ ru_post | hhid + round")),
+             cluster = ~hhid, data = fs)
+  ct <- coeftable(r)["ru_post", ]
+  cat(sprintf("  %-14s %+.4f (%.4f)  p = %.3f   pre-trend p = %.3f\n",
+              y, ct["Estimate"], ct["Std. Error"], ct["Pr(>|t|)"],
+              pretrend(fs, paste0(y, "_des"), g = "ru")$p))
 }
 
-print(rbind(
-    majority = run_def(alt |> filter(noff != ninf) |> mutate(informal = as.integer(ninf > noff)) |> select(hhid, informal)),
-    any      = run_def(alt |> mutate(informal = as.integer(ninf >= 1)) |> select(hhid, informal)),
-    all      = run_def(alt |> filter((ninf >= 1 & noff == 0) | (noff >= 1 & ninf == 0)) |>
-                           mutate(informal = as.integer(ninf >= 1)) |> select(hhid, informal))
-))
-cat("Expected majority +0.279 (53), any +0.219 (85), all +0.213 (40)\n")
+cat("\n=== First stage: receiving a remittance ===\n")
+esm <- feols(received_remit_des ~ i(event_time, ru, ref = -1) | hhid + round,
+             cluster = ~hhid, data = subset(fs, event_time >= -6 & event_time <= 12))
+ct <- coeftable(esm)
+cat("  invasion month:\n")
+print(round(ct[grep("event_time::0", rownames(ct)), , drop = FALSE], 4))
+cat("  annual interactions:\n")
+es_fs <- feols(received_remit ~ i(year, ru, ref = 2021) | hhid + year,
+               cluster = ~hhid, data = fs)
+print(round(coeftable(es_fs), 4))
 
-cat("\nReplication Complete\n")
-
-# Appendix C: Sample Construction, Source Variables, and Conversion Rates
-
-cat("\nTable C.2: Sample Construction\n")
-
-bm_all <- ind |> filter(round %in% B, !is.na(mig_living_country)) |>
+# 16. Baseline window robustness (Table B.6)
+cat("\n\n=== Table B.6: baseline window robustness ===\n")
+run_window <- function(lo, hi) {
+  W <- ind |> filter(round %in% lo:hi, !is.na(mig_living_country)) |>
     mutate(is_ru = as.integer(mig_living_country == 1))
-
-hh_panel   <- n_distinct(hhf$hhid)
-hh_migrant <- n_distinct(bm_all$hhid)
-ru_share   <- bm_all |> group_by(hhid) |>
-    summarise(ru = mean(is_ru), .groups = "drop")
-hh_russia  <- sum(ru_share$ru >  0.5)
-hh_other   <- sum(ru_share$ru <= 0.5)
-hh_nomig   <- hh_panel - hh_migrant
-
-status <- bm_all |>
-    filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
+  ru <- W |> group_by(hhid) |> summarise(r = mean(is_ru), .groups = "drop") |>
+    filter(r > 0.5) |> pull(hhid)
+  g <- W |> filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
     group_by(hhid) |>
     summarise(noff = sum(mig_living_work_official == 1),
               ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
-    filter(hhid %in% ru_share$hhid[ru_share$ru > 0.5])
-
-hh_status   <- nrow(status)
-hh_ties     <- sum(status$noff == status$ninf)
-hh_noanswer <- hh_russia - hh_status
-usable      <- status |> filter(noff != ninf)
-n_informal  <- sum(usable$ninf >  usable$noff)
-n_formal    <- sum(usable$noff >  usable$ninf)
-
-print(data.frame(
-    Step = c("Households in the L2CU panel",
-             "With a migrant abroad in the baseline window (rounds 39 to 42)",
-             "   of which migrants mostly in Russia",
-             "   of which migrants mostly in other destinations",
-             "Without a migrant in the baseline window",
-             "Russia migrant households with a usable formality status",
-             "   classified informal (majority rule)",
-             "   classified formal (majority rule)",
-             "   excluded (ties, and without a usable response)"),
-    Households = c(hh_panel, hh_migrant, hh_russia, hh_other, hh_nomig,
-                   n_informal + n_formal, n_informal, n_formal,
-                   hh_ties + hh_noanswer)),
-    row.names = FALSE)
-
-cat(sprintf("\n  of the %d excluded: %d ties, %d without a usable response\n",
-            hh_ties + hh_noanswer, hh_ties, hh_noanswer))
-cat("  migrant records over the four baseline rounds:",
-    sum(bm_all$is_ru == 1 & bm_all$mig_living_work_official %in% c(1,2)), "\n")
-cat("expected 2,499 / 254 / 204 / 50 / 2,245 / 190 / 53 / 137 / 14 (12 ties, 2 no answer), 981 records\n")
-
-# Table C.1: Source variables and survey wording
-cat("\nTable C.1: Source Variables\n")
-lab <- function(d, v) {
-    a <- attr(d[[v]], "label")
-    if (is.null(a)) "(no label)" else a
+    filter(hhid %in% ru, noff != ninf) |>
+    mutate(informal = as.integer(ninf > noff)) |> select(hhid, informal)
+  hh <- pan |> inner_join(g, by = "hhid") |>
+    mutate(inf_post = informal * post) |> haven::zap_labels()
+  hh$remit_ihs <- asinh(pmin(hh$remit_usd, cap))
+  hh <- deseason(hh, "food_insuff"); hh <- deseason(hh, "lifeline")
+  rf <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = hh)
+  rl <- feols(lifeline_des ~ inf_post | hhid + round, cluster = ~hhid, data = hh)
+  data.frame(window = sprintf("%d-%d (%d rounds)", lo, hi, hi - lo + 1),
+             russia = length(ru),
+             informal = sum(g$informal), formal = sum(g$informal == 0),
+             food = round(coef(rf)["inf_post"], 3),
+             food_se = round(se(rf)["inf_post"], 3),
+             pretrend = round(pretrend(hh, "food_insuff_des")$p, 3),
+             composite = round(coef(rl)["inf_post"], 3),
+             comp_p = round(pvalue(rl)["inf_post"], 3))
 }
-for (v in c("food_past30d","consumption_past30d","medical_past30d",
-            "utility_past30d","water_disruption","loan_past30d",
-            "savings_past30d","assets_past30d"))
-    cat(sprintf("  %-22s %s\n", v, lab(hhf, v)))
-for (v in c("mig_living_country","mig_living_work","mig_living_work_official",
-            "mig_living_remittance","remittance_hh"))
-    cat(sprintf("  %-22s %s\n", v, lab(ind, v)))
+wins <- list(c(39, 42), c(37, 42), c(34, 42), c(31, 42), c(25, 42), c(21, 42))
+print(do.call(rbind, lapply(wins, function(w) run_window(w[1], w[2]))), row.names = FALSE)
 
-# Table C.3: Currency conversion rates used
-cat("\nTable C.3: Currency Conversion\n")
-print(data.frame(Currency = c("Uzbek som","US dollar","Euro","Russian ruble","Kazakh tenge"),
-                 `Units per USD` = c(11500, 1, 0.91, 85, 460),
-                 check.names = FALSE), row.names = FALSE)
-cat("  (these are the fixed rates in the fx vector used above)\n")
+# 17. Raw means (Table B.1)
+cat("\n\n=== Table B.1: raw means ===\n")
+raw <- h |>
+  group_by(informal, post) |>
+  summarise(across(c(food_insuff, reduced_food, forgone_med), ~mean(.x, na.rm = TRUE)),
+            n = n(), .groups = "drop")
+print(as.data.frame(raw), row.names = FALSE)
+cat(sprintf("\n  informal pre-war food insecurity %.3f, post %.3f, ratio %.2f\n",
+            raw$food_insuff[raw$informal == 1 & raw$post == 0],
+            raw$food_insuff[raw$informal == 1 & raw$post == 1],
+            raw$food_insuff[raw$informal == 1 & raw$post == 1] /
+            raw$food_insuff[raw$informal == 1 & raw$post == 0]))
 
+# 18. Heterogeneity by remittance dependence (Table B.9)
+cat("\n\n=== Table B.9: dependence split ===\n")
+dep <- h |> filter(round %in% B) |>
+  group_by(hhid) |> summarise(dep = mean(received_remit == 1), .groups = "drop")
+med <- median(dep$dep)
+hd <- h |> left_join(dep, by = "hhid")
+for (lab in c("above", "at or below")) {
+  s <- if (lab == "above") hd[hd$dep > med, ] else hd[hd$dep <= med, ]
+  r <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = s)
+  cat(sprintf("  %-12s informal %d, formal %d, %+.3f (%.3f), obs %d\n", lab,
+              n_distinct(s$hhid[s$informal == 1]), n_distinct(s$hhid[s$informal == 0]),
+              coef(r)["inf_post"], se(r)["inf_post"], nrow(s)))
+}
 
-# 12b. Section 8.3: Oster (2019) sensitivity to unobservables
+# 19. Propensity score matching
+cat("\n\n=== Propensity score matching ===\n")
+vars <- c("mean_age", "max_educ", "share_female", "hhsize_b", "food_insec")
+Dm <- D[complete.cases(D[c("informal", vars)]), ]
+Dm$ps <- predict(glm(reformulate(vars, "informal"), family = binomial, data = Dm),
+                 type = "response")
+trt <- Dm[Dm$informal == 1, ]; trt <- trt[order(-trt$ps), ]
+ctl <- Dm[Dm$informal == 0, ]
+avail <- rep(TRUE, nrow(ctl)); pairs <- list()
+for (i in seq_len(nrow(trt))) {
+  d <- abs(ctl$ps - trt$ps[i]); d[!avail] <- Inf
+  j <- which.min(d)
+  if (is.finite(d[j])) { avail[j] <- FALSE
+    pairs[[length(pairs) + 1]] <- c(trt$hhid[i], ctl$hhid[j]) }
+}
+matched <- unlist(pairs)
+hm <- h[h$hhid %in% matched, ]
+hm <- deseason(hm, "food_insuff")
+rm_ <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = hm)
+cat(sprintf("  %d matched pairs, %+.4f (%.4f)\n", length(pairs),
+            coef(rm_)["inf_post"], se(rm_)["inf_post"]))
 
-cat("\nOster (2019) Sensitivity to Unobservables\n")
-
-# Baseline observables, one row per household
-dem <- ind |> filter(round %in% B) |>
-    group_by(hhid) |>
-    summarise(educ = suppressWarnings(max(education, na.rm = TRUE)),
-              fem  = mean(gender == 2, na.rm = TRUE),
-              agem = mean(age,        na.rm = TRUE), .groups = "drop") |>
-    mutate(across(everything(), ~ifelse(is.infinite(.x), NA, .x)))
-
-chan <- ind |> filter(round %in% B, mig_living_country == 1,
-                      mig_living_work_official %in% c(1, 2)) |>
-    group_by(hhid) |>
-    summarise(unoff = mean(mig_living_official == 2, na.rm = TRUE), .groups = "drop")
-
-hbase <- hhf |> filter(round %in% B) |>
-    group_by(hhid) |>
-    summarise(hsz  = mean(hhsize, na.rm = TRUE),
-              wage = mean(wage_past30d == 1, na.rm = TRUE), .groups = "drop")
-
+# 20. Observable confounders and Oster
+cat("\n\n=== Observable confounders ===\n")
 ho <- h |>
-    left_join(dem, by = "hhid") |>
-    left_join(chan, by = "hhid") |>
-    left_join(hbase, by = "hhid") |>
-    mutate(educ_p = educ * post, fem_p  = fem  * post, agem_p = agem * post,
-           unoff_p = unoff * post, hsz_p = hsz * post, wage_p = wage * post) |>
-    filter(!is.na(educ_p), !is.na(fem_p), !is.na(agem_p),
-           !is.na(unoff_p), !is.na(hsz_p), !is.na(wage_p),
-           !is.na(food_insuff_des))
+  left_join(select(D, hhid, max_educ, share_female, mean_age, unoff, hhsize_b, got_wage),
+            by = "hhid") |>
+  mutate(educ_p = max_educ * post, fem_p = share_female * post, agem_p = mean_age * post,
+         unoff_p = unoff * post, hsz_p = hhsize_b * post, wage_p = got_wage * post) |>
+  filter(!is.na(educ_p), !is.na(fem_p), !is.na(agem_p),
+         !is.na(unoff_p), !is.na(hsz_p), !is.na(wage_p), !is.na(food_insuff_des))
+ctrl <- list(
+  none      = feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = ho),
+  channel   = feols(food_insuff_des ~ inf_post + unoff_p | hhid + round, cluster = ~hhid, data = ho),
+  chan_educ = feols(food_insuff_des ~ inf_post + unoff_p + educ_p | hhid + round, cluster = ~hhid, data = ho),
+  female    = feols(food_insuff_des ~ inf_post + fem_p | hhid + round, cluster = ~hhid, data = ho),
+  wage      = feols(food_insuff_des ~ inf_post + wage_p | hhid + round, cluster = ~hhid, data = ho))
+etable(ctrl)
 
-# Restricted and full models
-# Oster's R-squared must include the explanatory power of the fixed effects,
-# so the household and round dummies enter as regressors rather than as
-# absorbed effects.
+cat(sprintf("\ncorrelation migration channel and formality: r = %.3f\n",
+            cor(D$unoff, D$informal, use = "complete.obs")))
+cat("\nwithin-channel comparison:\n")
+hw <- ho[ho$unoff > 0.5, ]
+hw <- deseason(hw, "food_insuff")
+rw_ <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = hw)
+cat(sprintf("  informal %d, formal %d, %+.4f (%.4f)\n",
+            n_distinct(hw$hhid[hw$informal == 1]), n_distinct(hw$hhid[hw$informal == 0]),
+            coef(rw_)["inf_post"], se(rw_)["inf_post"]))
+
+cat("\nOster (2019) sensitivity\n")
 m_r <- lm(food_insuff_des ~ inf_post + factor(hhid) + factor(round), data = ho)
 m_f <- lm(food_insuff_des ~ inf_post + educ_p + fem_p + agem_p +
-              unoff_p + hsz_p + wage_p + factor(hhid) + factor(round), data = ho)
-
+            unoff_p + hsz_p + wage_p + factor(hhid) + factor(round), data = ho)
 b0 <- coef(m_r)["inf_post"]; R0 <- summary(m_r)$r.squared
 b1 <- coef(m_f)["inf_post"]; R1 <- summary(m_f)$r.squared
-
-cat(sprintf("  restricted   beta = %+.4f   R2 = %.4f\n", b0, R0))
-cat(sprintf("  full         beta = %+.4f   R2 = %.4f\n", b1, R1))
-cat(sprintf("  observations %d, households %d\n", nrow(ho), n_distinct(ho$hhid)))
-cat(sprintf("  coefficient movement when observables are added: %+.4f\n\n", b1 - b0))
-
-# Delta and the bias-adjusted coefficient
+cat(sprintf("  restricted beta %+.4f  R2 %.4f\n  full       beta %+.4f  R2 %.4f\n",
+            b0, R0, b1, R1))
 oster <- function(b0, b1, R0, R1, mult) {
-    Rmax  <- min(mult * R1, 1)
-    delta <- (b1 * (R1 - R0)) / ((b0 - b1) * (Rmax - R1))
-    bstar <- b1 - (b0 - b1) * (Rmax - R1) / (R1 - R0)
-    c(Rmax = Rmax, delta = delta, beta_adjusted = bstar)
+  Rmax <- min(mult * R1, 1)
+  c(Rmax = Rmax,
+    delta = (b1 * (R1 - R0)) / ((b0 - b1) * (Rmax - R1)),
+    beta_adjusted = b1 - (b0 - b1) * (Rmax - R1) / (R1 - R0))
 }
 res <- t(sapply(c(1.3, 2.0), function(k) oster(b0, b1, R0, R1, k)))
 rownames(res) <- c("Rmax = 1.3 x R1", "Rmax = 2.0 x R1")
 print(round(res, 3))
 
-cat("\n  Reading: the estimate moves away from zero when the observable\n")
-cat("  differences are controlled for, so delta is negative. Unobserved\n")
-cat("  differences would have to be correlated with informal status in the\n")
-cat("  opposite direction from the observed ones to explain the result away.\n")
-cat("  expected: beta 0.279 -> 0.286, R2 0.234 -> 0.239, delta about -2.3\n")
+# 21. Time and placebo checks
+cat("\n\n=== Time and placebo checks ===\n")
+cat(sprintf("  COVID placebo (2020): %+.4f\n", coef(es)["year::2020:informal"]))
+h$inf_pre_mob  <- h$informal * (h$round >= 43 & h$round <= 49)
+h$inf_post_mob <- h$informal * (h$round >= 50)
+print(feols(food_insuff_des ~ inf_pre_mob + inf_post_mob | hhid + round,
+            cluster = ~hhid, data = h))
+h19 <- h |> filter(year >= 2019) |> select(-food_insuff_des)
+h19 <- deseason(h19, "food_insuff")
+r19 <- feols(food_insuff_des ~ inf_post | hhid + round, cluster = ~hhid, data = h19)
+cat(sprintf("  dropping 2018: %+.4f (%.4f), obs %d\n",
+            coef(r19)["inf_post"], se(r19)["inf_post"], nrow(h19)))
 
+# 22. Panel coverage and attrition
+cat("\n\n=== Panel coverage ===\n")
+cvg <- h |> group_by(hhid) |>
+  summarise(n_all = n(), n_pre = sum(post == 0), n_post = sum(post == 1),
+            all82 = as.integer(n() == 82),
+            both = as.integer(sum(post == 0) > 0 & sum(post == 1) > 0),
+            last12 = as.integer(any(round >= 71)), .groups = "drop") |>
+  left_join(grp, by = "hhid")
+cat(sprintf("  %.1f%% balanced, %.1f rounds avg, %d all 82, %d both sides\n",
+            100 * nrow(h) / (n_distinct(h$hhid) * 82), mean(cvg$n_all),
+            sum(cvg$all82), sum(cvg$both)))
+cat(sprintf("  %.1f of 42 pre, %.1f of 40 post\n", mean(cvg$n_pre), mean(cvg$n_post)))
+tt <- function(v) {
+  a <- cvg[[v]][cvg$informal == 1]; b <- cvg[[v]][cvg$informal == 0]
+  sprintf("informal %.1f, formal %.1f, p = %.2f", mean(a), mean(b), t.test(a, b)$p.value)
+}
+cat("  rounds observed  :", tt("n_all"), "\n")
+cat("  post-shock rounds:", tt("n_post"), "\n")
+cat("  in final 12      :", tt("last12"), "\n")
 
-# 13. Coping, excluded on identification grounds
-# The composite coping indicator survives the Romano and Wolf correction but
-# fails the pre-shock trend test, so it is set aside on identification grounds
-# rather than on significance. The differential is negative, which is what
-# prediction P3 expects if these households are buffer constrained.
-cat("\n COPING: EXCLUDED ON IDENTIFICATION GROUNDS \n")
-
-hc <- hhf |>
-    mutate(coping     = as.numeric(loan_past30d == 1 | savings_past30d == 1 |
-                                   assets_past30d == 1),
-           date       = as.Date(date_start),
-           month      = as.integer(format(date, "%m")),
-           post       = as.integer(round >= SHOCK),
-           event_time = round - SHOCK) |>
-    select(hhid, round, month, post, event_time, coping) |>
-    inner_join(grp, by = "hhid") |>
-    mutate(inf_post = informal * post) |>
-    haven::zap_labels()
-hc <- deseason(hc, "coping")
-
-print(feols(coping_des ~ inf_post | hhid + round, cluster = ~hhid, data = hc))
-cat(sprintf("\n  pre-shock trend test  p = %.4f\n", pretrend(hc, "coping_des")))
-cat("  expected -0.081 (0.018), pre-trend 0.010: the outcome fails the\n")
-cat("  identification gate despite surviving the multiple testing correction\n")
-
-
-# 14. First stage: receiving a remittance
-# Russia-exposed against other-destination migrant households. The sample is
-# defined by BASELINE migrant status: filtering row by row on whether someone
-# was abroad in a given round gives 893 households and is wrong.
-cat("\n FIRST STAGE: RECEIVING A REMITTANCE \n")
-
-dest <- ind |>
-    filter(round %in% B, !is.na(mig_living_country)) |>
-    mutate(is_ru = as.integer(mig_living_country == 1)) |>
-    group_by(hhid) |>
-    summarise(ru = as.integer(mean(is_ru) > 0.5), .groups = "drop")
-
-fs <- pan |>
-    filter(hhid %in% dest$hhid) |>
-    left_join(dest, by = "hhid") |>
-    mutate(ru_post = ru * post) |>
-    haven::zap_labels()
-
-cat(sprintf("  households %d (Russia-exposed %d, other destinations %d), obs %d\n",
-            n_distinct(fs$hhid),
-            n_distinct(fs$hhid[fs$ru == 1]),
-            n_distinct(fs$hhid[fs$ru == 0]),
-            nrow(fs)))
-cat("  expected 254 (204, 50), 18,802\n")
-
-fs <- deseason(fs, "received_remit", grp = "ru")
-
-## parallel trends, Section 6.1
-W    <- fs |> filter(event_time >= -12, event_time <= 18)
-pt   <- feols(received_remit_des ~ i(event_time, ru, ref = -1) | hhid + round,
-              cluster = ~hhid, data = W)
-lead <- grep("event_time::-", names(coef(pt)), value = TRUE)
-esc  <- function(x) gsub("([.^$|?*+()\\[\\]])", "\\\\\\1", x)
-cat(sprintf("\n  first-stage pre-shock trend test  p = %.3f   expected 0.50\n",
-            wald(pt, keep = paste0("^", esc(lead), "$"), print = FALSE)$p))
-
-## invasion month, Section 7.1
-esm <- feols(received_remit_des ~ i(event_time, ru, ref = -1) | hhid + round,
-             cluster = ~hhid,
-             data = subset(fs, event_time >= -6 & event_time <= 12))
-ct  <- coeftable(esm)
-cat("\n  invasion month (event_time = 0)\n")
-print(round(ct[grep("event_time::0", rownames(ct)), , drop = FALSE], 4))
-cat("      expected -0.204, standard error 0.061\n")
-
-## annual interactions, Section 7.1
-cat("\n  annual interactions, relative to 2021\n")
-print(round(coeftable(
-    feols(received_remit ~ i(year, ru, ref = 2021) | hhid + year,
-          cluster = ~hhid, data = fs)), 4))
-cat("      expected 2022 +0.100; the pre-war years are indistinguishable from zero\n")
-
-
-# 15. Appendix C.2: sample construction
-cat("\n=========== TABLE C.2: SAMPLE CONSTRUCTION ===========\n")
-
-status <- ind |>
-    filter(round %in% B, !is.na(mig_living_country),
-           mig_living_country == 1, mig_living_work_official %in% c(1, 2)) |>
-    group_by(hhid) |>
-    summarise(noff = sum(mig_living_work_official == 1),
-              ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
-    filter(hhid %in% russia)
-
+# 23. Appendix C: sample construction and variable definitions
+cat("\n\n=== Appendix C: sample construction ===\n")
+bm_all <- ind |> filter(round %in% B, !is.na(mig_living_country)) |>
+  mutate(is_ru = as.integer(mig_living_country == 1))
+ru_share <- bm_all |> group_by(hhid) |> summarise(ru = mean(is_ru), .groups = "drop")
+status <- bm_all |>
+  filter(is_ru == 1, mig_living_work_official %in% c(1, 2)) |>
+  group_by(hhid) |>
+  summarise(noff = sum(mig_living_work_official == 1),
+            ninf = sum(mig_living_work_official == 2), .groups = "drop") |>
+  filter(hhid %in% russia)
 usable <- status |> filter(noff != ninf)
 print(data.frame(
-    Step = c("Households in the L2CU panel",
-             "With a migrant abroad in the baseline window",
-             "   of which migrants mostly in Russia",
-             "   of which migrants mostly elsewhere",
-             "Without a migrant in the baseline window",
-             "Russia migrant households with a usable status",
-             "   classified informal (majority rule)",
-             "   classified formal (majority rule)",
-             "   excluded as ties or without a usable answer"),
-    Households = c(n_distinct(hhf$hhid), nrow(dest), sum(dest$ru == 1), sum(dest$ru == 0),
-                   n_distinct(hhf$hhid) - nrow(dest), nrow(usable),
-                   sum(usable$ninf > usable$noff), sum(usable$noff > usable$ninf),
-                   length(russia) - nrow(usable))),
-    row.names = FALSE)
-cat(sprintf("\n  of the excluded: %d ties, %d without a usable answer\n",
+  Step = c("Households in L2CU panel",
+           "With a migrant abroad in baseline window",
+           "   of which migrants mostly in Russia",
+           "   of which migrants mostly in other destinations",
+           "Without a migrant",
+           "Russia migrant households with usable status",
+           "   classified informal (majority rule)",
+           "   classified formal (majority rule)",
+           "   excluded (ties/no answer)"),
+  Households = c(n_distinct(hhf$hhid), n_distinct(bm_all$hhid),
+                 sum(ru_share$ru > 0.5), sum(ru_share$ru <= 0.5),
+                 n_distinct(hhf$hhid) - n_distinct(bm_all$hhid),
+                 nrow(usable), sum(usable$ninf > usable$noff),
+                 sum(usable$noff > usable$ninf), length(russia) - nrow(usable))),
+  row.names = FALSE)
+cat(sprintf("  excluded: %d ties, %d no answer\n",
             sum(status$noff == status$ninf), length(russia) - nrow(status)))
-cat("  expected 2,499 / 254 / 204 / 50 / 2,245 / 190 / 53 / 137 / 14 (12 ties, 2 no answer)\n")
 
-cat("\n REPLICATION COMPLETE \n")
+b_rec <- ind |>
+  filter(round %in% B, mig_living_country == 1,
+         mig_living_work_official %in% c(1, 2), hhid %in% russia)
+cat(sprintf("  usable migrant records: %d, households: %d, records per hh-round: %.2f\n",
+            nrow(b_rec), n_distinct(b_rec$hhid),
+            nrow(b_rec) / nrow(unique(b_rec[c("hhid","round")]))))
+
+cat("\n=== Table C.1: source variables (wording) ===\n")
+lab <- function(d, v) { a <- attr(d[[v]], "label"); if (is.null(a)) "(no label)" else a }
+for (v in c("food_past30d","consumption_past30d","medical_past30d",
+            "utility_past30d","water_disruption","loan_past30d",
+            "savings_past30d","assets_past30d"))
+  cat(sprintf("  %-22s %s\n", v, lab(hhf, v)))
+for (v in c("mig_living_country","mig_living_work","mig_living_work_official",
+            "mig_living_official","mig_living_remittance","remittance_hh"))
+  cat(sprintf("  %-22s %s\n", v, lab(ind, v)))
+
+cat("\n=== Table C.3: currency conversion ===\n")
+print(data.frame(Currency = c("Uzbek som","US dollar","Euro","Russian ruble","Kazakh tenge"),
+                 `Units per USD` = c(11500, 1, 0.91, 85, 460),
+                 check.names = FALSE), row.names = FALSE)
+
+cat("\n\n=== REPLICATION COMPLETE ===\n")
