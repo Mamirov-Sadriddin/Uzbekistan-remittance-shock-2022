@@ -2,7 +2,7 @@
 *.dta
 *.csv
 *.RData
-*.rds
+*.sav
 *.xlsx
 *.xls
 *.tsv
