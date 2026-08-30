@@ -6,7 +6,7 @@ This repository contains the replication code for the Master's thesis
 ## Data
 
 The code uses the **Listening to Citizens of Uzbekistan (L2CU)** panel, waves 1–82  
-(September 2018 – June 2025). The data are not included here due to access restrictions.
+(September 2018 – June 2025).
 
 You can obtain the raw `.sav` files from the World Bank Microdata Library:  
 [https://microdata.worldbank.org](https://microdata.worldbank.org)
