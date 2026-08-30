@@ -9,7 +9,7 @@ The code uses the **Listening to Citizens of Uzbekistan (L2CU)** panel, waves 1â
 (September 2018 â€“ June 2025).
 
 You can obtain the raw `.sav` files from the World Bank Microdata Library:  
-[https://microdata.worldbank.org](https://microdata.worldbank.org)
+[https://microdata.worldbank.org/catalog/6412  
 
 Place the following two files in `~/Downloads/` (or adjust the `PATH` variable in the script):
 
